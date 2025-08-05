@@ -1,0 +1,120 @@
+version: "3.8"
+
+services:
+  # DeepSeek R1 로컬 LLM 서비스
+  deepseek-r1:
+    image: ollama/ollama:latest
+    container_name: deepseek-r1-server
+    ports:
+      - "11434:11434"
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_PORT=11434
+    volumes:
+      - ./data/ollama:/root/.ollama
+    restart: unless-stopped
+    networks:
+      - mcp-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # GPU 지원 (선택사항)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # ChromaDB 벡터 데이터베이스 서비스 (우선 시작)
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: chromadb-server
+    ports:
+      - "8001:8000"
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
+    volumes:
+      # 🔒 호스트 경로에 직접 바인딩 (데이터 안전성)
+      - ./data/chroma:/data
+      # 개발 환경용 백업 디렉토리
+      - ./backups/chroma:/backups
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # FastMCP 서버 (ChromaDB 준비 후 시작)
+  fastmcp-server:
+    build: .
+    container_name: fastmcp-prompt-enhancement
+    ports:
+      - "8000:8000" # SSE 모드를 위한 포트 노출
+    environment:
+      # 🔐 OpenAI API 설정 (선택사항)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+
+      # 🤖 임베딩 모델 설정
+      - EMBEDDING_MODEL_TYPE=${EMBEDDING_MODEL_TYPE:-deepseek}
+      - DEEPSEEK_API_BASE=http://deepseek-r1:11434
+      - DEEPSEEK_EMBEDDING_MODEL=${DEEPSEEK_EMBEDDING_MODEL:-nomic-embed-text}
+      - DEEPSEEK_LLM_MODEL=${DEEPSEEK_LLM_MODEL:-r1-1776:latest}
+
+      # 📊 ChromaDB 연결 설정
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - CHROMA_DB_PATH=/data
+
+      # 📝 로깅 설정
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_DIR=/data/logs
+
+      # 🚀 MCP 설정
+      - MCP_SERVER_NAME=FastMCP Prompt Enhancement Server
+      - MCP_VERSION=2.0.0
+
+      # 🧠 AI 설정
+      - MAX_CONTEXT_LENGTH=${MAX_CONTEXT_LENGTH:-5}
+      - SIMILARITY_THRESHOLD=${SIMILARITY_THRESHOLD:-0.7}
+
+      # 📈 분석 설정
+      - ENABLE_ADVANCED_ANALYTICS=${ENABLE_ADVANCED_ANALYTICS:-true}
+      - CLUSTERING_ALGORITHM=${CLUSTERING_ALGORITHM:-kmeans}
+      - MAX_CLUSTERS=${MAX_CLUSTERS:-10}
+    volumes:
+      # 🗂️ 로그 및 데이터 저장을 위한 볼륨 마운트
+      - ./data:/data
+
+      # 🎯 선택적 프로젝트 마운트 (원하는 프로젝트만 추가)
+      # 전체 프로젝트 폴더 마운트 (모든 프로젝트 인덱싱)
+      # - /Users/soobeen/Desktop/Project:/host_projects:ro
+
+      # 👇 특정 프로젝트만 선택적으로 마운트하려면 아래 예시처럼 사용하세요
+      # 원하는 프로젝트 폴더만 개별적으로 마운트:
+      - /Users/soobeen/Desktop/Project/lovechedule-app:/host_projects/lovechedule-app:ro
+      - /Users/soobeen/Desktop/Project/lovechedule:/host_projects/lovechedule:ro
+      # - /Users/soobeen/Desktop/Project/web-frontend:/host_projects/web-frontend:ro
+      # - /Users/soobeen/Desktop/Project/api-backend:/host_projects/api-backend:ro
+
+      # 📝 사용 방법:
+      # 1. 위 주석을 해제하고 실제 프로젝트 경로로 수정
+      # 2. 원하는 프로젝트 라인만 활성화
+      # 3. docker-compose up -d 로 재시작
+
+      # 🔍 예시: mcp-server 프로젝트만 인덱싱하고 싶다면
+      # - /Users/soobeen/Desktop/Project/mcp-server:/host_projects/mcp-server:ro
+    restart: unless-stopped
+    depends_on:
+      - chromadb
+      - deepseek-r1
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge
+# 호스트 바인딩 사용으로 volumes 섹션 제거

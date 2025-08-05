@@ -1,0 +1,67 @@
+version: "3.8"
+
+services:
+  # ChromaDB 벡터 데이터베이스 서비스 (우선 시작)
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: chromadb-server
+    ports:
+      - "8001:8000"
+    environment:
+      - CHROMA_SERVER_HOST=0.0.0.0
+      - CHROMA_SERVER_HTTP_PORT=8000
+    volumes:
+      # 🔒 호스트 경로에 직접 바인딩 (데이터 안전성)
+      - ./data/chroma:/data
+      # 개발 환경용 백업 디렉토리
+      - ./backups/chroma:/backups
+    restart: unless-stopped
+    networks:
+      - mcp-network
+
+  # FastMCP 서버 (ChromaDB 준비 후 시작)
+  fastmcp-server:
+    build: .
+    container_name: fastmcp-prompt-enhancement
+    ports:
+      - "8000:8000" # SSE 모드를 위한 포트 노출
+    environment:
+      # 🔐 OpenAI API 설정
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+
+      # 📊 ChromaDB 연결 설정
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - CHROMA_DB_PATH=/data
+
+      # 📝 로깅 설정
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_DIR=/data/logs
+
+      # 🚀 MCP 설정
+      - MCP_SERVER_NAME=FastMCP Prompt Enhancement Server
+      - MCP_VERSION=2.0.0
+
+      # 🧠 AI 설정
+      - MAX_CONTEXT_LENGTH=${MAX_CONTEXT_LENGTH:-5}
+      - SIMILARITY_THRESHOLD=${SIMILARITY_THRESHOLD:-0.7}
+
+      # 📈 분석 설정
+      - ENABLE_ADVANCED_ANALYTICS=${ENABLE_ADVANCED_ANALYTICS:-true}
+      - CLUSTERING_ALGORITHM=${CLUSTERING_ALGORITHM:-kmeans}
+      - MAX_CLUSTERS=${MAX_CLUSTERS:-10}
+    volumes:
+      # 🗂️ 로그 및 데이터 저장을 위한 볼륨 마운트
+      - ./data:/data
+      # 🔗 호스트 프로젝트 디렉토리 마운트 (MCP 툴에서 접근 가능)
+      - /Users/soobeen/Desktop/Project:/host_projects:ro
+    restart: unless-stopped
+    depends_on:
+      - chromadb
+    networks:
+      - mcp-network
+
+networks:
+  mcp-network:
+    driver: bridge
+# 호스트 바인딩 사용으로 volumes 섹션 제거
