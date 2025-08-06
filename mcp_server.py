@@ -132,25 +132,66 @@ class SSEEventType:
 )
 @measure_performance(operation_name="service_initialization", threshold=10.0)
 async def initialize_services():
-    """서비스 초기화"""
+    """모든 서비스 초기화"""
     global vector_service, enhancement_service, file_indexing_service, fast_indexing_service, analytics_service, feedback_service, langchain_rag_service, file_watcher_service, auto_indexing_service, _services_initialized
     
-    if _services_initialized:
-        logger.info("서비스가 이미 초기화되었습니다")
-        return
+    try:
+        # 설정 검증
+        logger.info("환경 설정 검증 중...")
+        required_settings = [
+            'chroma_db_path', 'embedding_model_type', 
+            'max_concurrent_requests', 'embedding_batch_size'
+        ]
+        
+        for setting in required_settings:
+            if not hasattr(settings, setting):
+                logger.warning(f"설정 누락: {setting}, 기본값 사용")
+        
+        # 벡터 서비스 초기화
+        logger.info("벡터 서비스 초기화 중...")
+        vector_service = VectorService()
+        # ChromaDB는 VectorService 생성자에서 자동 초기화됨
+        
+        # 프롬프트 향상 서비스
+        logger.info("프롬프트 향상 서비스 초기화 중...")
+        prompt_service = PromptEnhancementService(vector_service)
+        
+        # 파일 인덱싱 서비스
+        logger.info("파일 인덱싱 서비스 초기화 중...")
+        file_indexing_service = FileIndexingService(vector_service)
+        
+        # 고속 인덱싱 서비스
+        logger.info("고속 인덱싱 서비스 초기화 중...")
+        fast_indexing_service = FastIndexingService(vector_service)
+        
+        # 고급 분석 서비스
+        logger.info("고급 분석 서비스 초기화 중...")
+        analytics_service = AdvancedAnalyticsService()  # 인자 없이 생성
+        
+        # 피드백 서비스
+        logger.info("피드백 서비스 초기화 중...")
+        feedback_service = FeedbackService(vector_service)  # vector_service 필요
+        
+        # LangChain RAG 서비스
+        logger.info("LangChain RAG 서비스 초기화 중...")
+        langchain_rag_service = LangChainRAGService(vector_service)
+        
+        # 파일 감시 서비스
+        logger.info("파일 감시 서비스 초기화 중...")
+        file_watcher_service = FileWatcherService(vector_service)
+        
+        # 자동 인덱싱 서비스
+        logger.info("자동 인덱싱 서비스 초기화 중...")
+        auto_indexing_service = AutoIndexingService(vector_service, file_indexing_service)  # 두 개의 인자 필요
+        
+        # 전역 변수 설정
+        enhancement_service = prompt_service  # 호환성을 위한 별칭
+        
+    except Exception as e:
+        logger.error(f"서비스 초기화 실패: {e}", exc_info=True)
+        raise
     
-    logger.info("서비스 초기화 시작...")
-    
-    # 서비스 인스턴스 생성
-    vector_service = VectorService()
-    analytics_service = AdvancedAnalyticsService()
-    enhancement_service = PromptEnhancementService(vector_service)
-    file_indexing_service = FileIndexingService(vector_service)
-    fast_indexing_service = FastIndexingService(vector_service)
-    feedback_service = FeedbackService(vector_service)
-    langchain_rag_service = LangChainRAGService(vector_service)
-    file_watcher_service = FileWatcherService(vector_service)
-    auto_indexing_service = AutoIndexingService(vector_service, file_indexing_service)
+    logger.info("모든 서비스가 초기화되었습니다")
     
     # 자동 인덱싱 서비스 시작 (백그라운드에서)
     logger.info("자동 백그라운드 인덱싱 서비스 시작...")
@@ -573,9 +614,9 @@ async def upload_batch(request):
         indexed_files = []
         failed_files = []
         
-        # 배치 단위로 처리 (100개씩)
-        batch_size = 100
-        semaphore = asyncio.Semaphore(50)  # 훨씬 높은 동시성
+        # 배치 단위로 처리 (200개씩) - 기존 100개에서 증가
+        batch_size = 200
+        semaphore = asyncio.Semaphore(100)  # 50 → 100으로 증가 (더 높은 동시성)
         
         async def process_file_batch(file_data):
             async with semaphore:
@@ -1945,276 +1986,7 @@ async def heartbeat(request):
             "timestamp": asyncio.get_event_loop().time()
         })
 
-# @mcp.tool()
-# @handle_errors(
-#     category=ErrorCategory.DATABASE,
-#     level=ErrorLevel.HIGH,
-#     user_message="네트워크 프로젝트 업로드 중 오류가 발생했습니다."
-# )
-# @measure_performance(operation_name="network_project_upload", threshold=120.0)
-# async def network_project_upload(
-#     project_path: str,
-#     project_id: str = "default",
-#     project_name: str = None,
-#     max_workers: int = 20,
-#     batch_size: int = 200
-# ) -> Dict[str, Any]:
-#     """
-#     🚀 네트워크 기반 고성능 프로젝트 업로드 및 인덱싱
-    
-#     로컬 파일 시스템에서 파일들을 읽어 HTTP API를 통해 업로드하고 벡터 인덱싱합니다.
-#     Docker 환경에서 호스트 파일 시스템에 접근할 때 사용합니다.
-    
-#     Args:
-#         project_path: 업로드할 프로젝트 경로
-#         project_id: 프로젝트 식별자 (기본값: "default")
-#         project_name: 프로젝트 이름 (기본값: 경로에서 추출)
-#         max_workers: 병렬 파일 읽기 워커 수 (기본값: 20)
-#         batch_size: 배치 크기 (기본값: 200)
-    
-#     Returns:
-#         업로드 결과 및 성능 통계
-#     """
-#     import aiohttp
-#     import aiofiles
-#     import math
-#     from pathlib import Path
-    
-#     logger.info(f"🚀 네트워크 프로젝트 업로드 시작: {project_path}")
-    
-#     # 입력 검증
-#     if not validate_project_id(project_id):
-#         return {
-#             "success": False,
-#             "error": "유효하지 않은 프로젝트 ID입니다."
-#         }
-    
-#     project_path = Path(project_path).resolve()
-    
-#     if not project_path.exists():
-#         return {
-#             "success": False,
-#             "error": f"프로젝트 경로가 존재하지 않습니다: {project_path}"
-#         }
-    
-#     if not project_name:
-#         project_name = project_path.name
-    
-#     # 지원하는 파일 확장자들
-#     SUPPORTED_EXTENSIONS = {
-#         '.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.cpp', '.c', '.cs',
-#         '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.scala',
-#         '.md', '.txt', '.rst', '.asciidoc',
-#         '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg',
-#         '.sql', '.sh', '.bash', '.ps1',
-#         '.html', '.css', '.scss', '.sass', '.less',
-#         '.vue', '.svelte', '.astro'
-#     }
-    
-#     # 무시할 디렉토리들
-#     IGNORE_DIRECTORIES = {
-#         'node_modules', 'bower_components', '__pycache__', '.pytest_cache',
-#         '.mypy_cache', 'venv', 'env', '.env', '.git', '.svn', '.hg',
-#         '.vscode', '.idea', 'dist', 'build', 'target', 'out', '.next',
-#         'bin', 'obj', 'Debug', 'Release', 'vendor', 'pkg', 'cache',
-#         'tmp', 'temp', 'coverage', 'logs', 'assets', 'public', 'static',
-#         'chroma_db'
-#     }
-    
-#     # 무시할 파일들
-#     IGNORE_FILES = {
-#         '.gitignore', '.dockerignore', '.env', '.env.local',
-#         'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
-#         'poetry.lock', 'Pipfile.lock', 'pdm.lock',
-#         'composer.lock', 'Gemfile.lock', 'Cargo.lock',
-#         'go.sum', 'mix.lock', 'pubspec.lock'
-#     }
-    
-#     async def read_file_async(file_path: Path) -> Dict[str, Any]:
-#         """비동기 파일 읽기"""
-#         try:
-#             # 파일 크기 체크 (10MB 이상은 제외)
-#             if file_path.stat().st_size > 10 * 1024 * 1024:  # 10MB
-#                 return None
-            
-#             # 비동기 파일 읽기
-#             async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-#                 content = await f.read()
-            
-#             # 너무 작은 파일 제외
-#             if len(content.strip()) < 10:
-#                 return None
-            
-#             relative_path = file_path.relative_to(project_path)
-#             return {
-#                 "path": str(relative_path),
-#                 "content": content,
-#                 "size": len(content)
-#             }
-            
-#         except Exception as e:
-#             logger.warning(f"파일 읽기 실패 {file_path}: {e}")
-#             return None
-    
-#     # 파일 경로 수집
-#     logger.info(f"📂 프로젝트 스캔 중: {project_path}")
-#     file_paths = []
-    
-#     for root, dirs, files in os.walk(project_path):
-#         # 무시할 디렉토리 제거
-#         dirs[:] = [d for d in dirs if d not in IGNORE_DIRECTORIES]
-        
-#         for file in files:
-#             if file in IGNORE_FILES:
-#                 continue
-            
-#             # .으로 시작하는 숨김 파일 제외
-#             if file.startswith('.'):
-#                 continue
-                
-#             file_path = Path(root) / file
-            
-#             # 지원하는 확장자만 처리
-#             if file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
-#                 file_paths.append(file_path)
-    
-#     logger.info(f"📂 {len(file_paths)}개 파일 발견, 병렬 읽기 시작...")
-    
-#     # 파일들을 비동기 병렬로 읽기
-#     semaphore = asyncio.Semaphore(max_workers)
-    
-#     async def read_with_semaphore(file_path):
-#         async with semaphore:
-#             return await read_file_async(file_path)
-    
-#     # 모든 파일을 병렬로 읽기
-#     results = await asyncio.gather(
-#         *[read_with_semaphore(file_path) for file_path in file_paths],
-#         return_exceptions=True
-#     )
-    
-#     # 유효한 파일만 필터링
-#     files_data = []
-#     for result in results:
-#         if result is not None and not isinstance(result, Exception):
-#             files_data.append(result)
-    
-#     logger.info(f"✅ {len(files_data)}개 파일 읽기 완료")
-    
-#     if not files_data:
-#         return {
-#             "success": False,
-#             "error": "업로드할 유효한 파일이 없습니다."
-#         }
-    
-#     # 파일 크기별 통계
-#     total_size = sum(f["size"] for f in files_data)
-#     logger.info(f"📊 총 크기: {total_size / 1024:.1f} KB")
-    
-#     # 배치로 나누기
-#     total_batches = math.ceil(len(files_data) / batch_size)
-#     logger.info(f"🚀 {total_batches}개 배치로 나누어 병렬 업로드 시작...")
-    
-#     start_time = time.time()
-    
-#     # 배치 업로드 함수
-#     async def upload_batch(files_batch: List[Dict[str, Any]], batch_num: int):
-#         upload_data = {
-#             "project_id": project_id,
-#             "project_name": project_name,
-#             "files": files_batch
-#         }
-        
-#         logger.info(f"📤 배치 {batch_num}/{total_batches} 업로드 중... ({len(files_batch)}개 파일)")
-        
-#         # 현재 서버의 upload-batch 엔드포인트 사용
-#         upload_url = "http://localhost:8000/api/v1/upload-batch"
-        
-#         async with aiohttp.ClientSession() as session:
-#             async with session.post(
-#                 upload_url,
-#                 json=upload_data,
-#                 timeout=aiohttp.ClientTimeout(total=600)  # 10분 타임아웃
-#             ) as response:
-                
-#                 if response.status == 200:
-#                     result = await response.json()
-#                     logger.info(f"✅ 배치 {batch_num}/{total_batches} 완료 (성공률: {result.get('success_rate', 0)}%)")
-#                     return result
-#                 else:
-#                     error_text = await response.text()
-#                     logger.error(f"배치 {batch_num} 업로드 실패: {error_text}")
-#                     raise Exception(f"배치 {batch_num} 업로드 실패 (HTTP {response.status})")
-    
-#     # 배치들을 병렬로 업로드
-#     upload_tasks = []
-#     for i in range(0, len(files_data), batch_size):
-#         batch = files_data[i:i + batch_size]
-#         batch_num = i // batch_size + 1
-        
-#         task = upload_batch(batch, batch_num)
-#         upload_tasks.append(task)
-    
-#     # 모든 배치 업로드를 병렬로 실행
-#     batch_results = await asyncio.gather(*upload_tasks, return_exceptions=True)
-    
-#     # 결과 집계
-#     total_received = 0
-#     total_indexed = 0
-#     total_failed = 0
-#     tech_stacks = set()
-#     failed_batches = 0
-    
-#     for i, result in enumerate(batch_results):
-#         if isinstance(result, Exception):
-#             logger.error(f"❌ 배치 {i+1} 업로드 실패: {result}")
-#             failed_batches += 1
-#             continue
-        
-#         total_received += result.get('total_files_received', 0)
-#         total_indexed += result.get('indexed_files_count', 0)
-#         total_failed += result.get('failed_files_count', 0)
-#         tech_stacks.update(result.get('tech_stack', []))
-    
-#     end_time = time.time()
-#     upload_time = end_time - start_time
-    
-#     success_rate = (total_indexed / total_received * 100) if total_received > 0 else 0
-#     processing_speed = total_indexed / upload_time if upload_time > 0 else 0
-    
-#     logger.info(f"🎉 네트워크 업로드 완료! ({upload_time:.2f}초)")
-#     logger.info(f"   📤 전송된 파일: {total_received}개")
-#     logger.info(f"   ✅ 인덱싱된 파일: {total_indexed}개") 
-#     logger.info(f"   ❌ 실패한 파일: {total_failed}개")
-#     logger.info(f"   📈 성공률: {success_rate:.1f}%")
-#     logger.info(f"   🚀 처리 속도: {processing_speed:.1f} 파일/초")
-#     logger.info(f"   🔧 기술 스택: {', '.join(sorted(tech_stacks))}")
-    
-#     return {
-#         "success": True,
-#         "project_id": project_id,
-#         "project_name": project_name,
-#         "project_path": str(project_path),
-#         "total_files_scanned": len(file_paths),
-#         "total_files_read": len(files_data),
-#         "total_files_received": total_received,
-#         "indexed_files_count": total_indexed,
-#         "failed_files_count": total_failed,
-#         "success_rate": round(success_rate, 1),
-#         "upload_time": round(upload_time, 2),
-#         "processing_speed": round(processing_speed, 1),
-#         "total_batches": total_batches,
-#         "failed_batches": failed_batches,
-#         "batch_size": batch_size,
-#         "max_workers": max_workers,
-#         "total_size_kb": round(total_size / 1024, 1),
-#         "tech_stack": sorted(list(tech_stacks)),
-#         "performance_metrics": {
-#             "files_per_second": round(processing_speed, 1),
-#             "kb_per_second": round((total_size / 1024) / upload_time, 1) if upload_time > 0 else 0,
-#             "batch_success_rate": round((total_batches - failed_batches) / total_batches * 100, 1) if total_batches > 0 else 0
-#         }
-#     }
+# 주석 처리된 네트워크 업로드 함수 제거됨 (사용하지 않음)
 
 
 
@@ -2230,52 +2002,77 @@ async def cleanup_services():
     logger.info("서비스 정리 시작...")
     
     try:
+        # 자동 인덱싱 서비스 중지
         if auto_indexing_service and auto_indexing_service.is_running:
             logger.info("자동 인덱싱 서비스 중지 중...")
             await auto_indexing_service.stop()
         
+        # 파일 감시 서비스 중지
         if file_watcher_service:
+            logger.info("파일 감시 서비스 중지 중...")
             await file_watcher_service.stop_all_watchers()
+        
+        # 벡터 서비스 정리
+        if vector_service:
+            logger.info("벡터 서비스 정리 중...")
+            if hasattr(vector_service, 'embeddings') and vector_service.embeddings:
+                if hasattr(vector_service.embeddings, 'close'):
+                    await vector_service.embeddings.close()
+        
+        # 고속 인덱싱 서비스 정리
+        if fast_indexing_service:
+            logger.info("고속 인덱싱 서비스 정리 중...")
+            if hasattr(fast_indexing_service, 'thread_executor'):
+                fast_indexing_service.thread_executor.shutdown(wait=False)
+        
+        # ChromaDB 연결 정리
+        if vector_service and vector_service.chroma_client:
+            logger.info("ChromaDB 연결 정리 중...")
+            # ChromaDB는 자동으로 정리됨
         
         logger.info("모든 서비스가 정리되었습니다")
         
     except Exception as e:
-        logger.error(f"서비스 정리 중 오류: {e}")
+        logger.error(f"서비스 정리 중 오류: {e}", exc_info=True)
 
 if __name__ == "__main__":
     import signal
+    import sys
     
-    logger.info("FastMCP 서버 시작...")
+    logger.info("🚀 FastMCP 서버 시작...")
     
-    # 서버 실행 전 서비스 초기화
+    # 서비스 초기화
     try:
         asyncio.run(initialize_services())
-        logger.info("서비스 초기화 완료, SSE 모드로 MCP 서버 실행")
+        logger.info("서비스 초기화 완료")
     except Exception as e:
         logger.error(f"서비스 초기화 실패: {e}")
         sys.exit(1)
     
-    # 신호 핸들러 정의 (동기 함수)
     def signal_handler(sig, frame):
-        """신호 핸들러"""
+        """신호 처리기"""
         logger.info(f"종료 신호 수신: {sig}")
         try:
-            asyncio.run(cleanup_services())
+            # 새로운 이벤트 루프 생성하여 정리
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(cleanup_services())
+            loop.close()
         except Exception as e:
             logger.error(f"서비스 정리 중 오류: {e}")
         sys.exit(0)
     
-    # 신호 핸들러 등록
+    # 신호 처리기 등록
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # SSE 방식으로 서버 실행 (기본 포트 8000 사용)
     try:
+        # FastMCP 서버 실행 (SSE 모드)
+        logger.info("SSE 모드로 MCP 서버 실행 중...")
         mcp.run(transport="sse")
     except KeyboardInterrupt:
-        logger.info("서버가 사용자에 의해 중단되었습니다")
-        asyncio.run(cleanup_services())
+        logger.info("키보드 인터럽트 감지")
+        signal_handler(signal.SIGINT, None)
     except Exception as e:
-        logger.error(f"서버 실행 중 오류: {e}")
-        asyncio.run(cleanup_services())
+        logger.error(f"서버 실행 중 오류: {e}", exc_info=True)
         sys.exit(1) 

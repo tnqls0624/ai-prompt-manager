@@ -411,6 +411,17 @@ class FileWatcherService:
     def __del__(self):
         """소멸자 - 모든 감시자 정리"""
         try:
-            asyncio.create_task(self.stop_all_watchers())
-        except Exception:
-            pass 
+            # 동기적으로 모든 감시자 중지
+            for project_id, observer in self.observers.items():
+                if observer and observer.is_alive():
+                    observer.stop()
+                    observer.join(timeout=1.0)  # 최대 1초 대기
+                    logger.debug(f"프로젝트 {project_id} 감시자 정리 완료")
+            
+            self.observers.clear()
+            self.watched_projects.clear()
+            self.file_hashes.clear()
+            self.last_processed.clear()
+            
+        except Exception as e:
+            logger.warning(f"감시자 정리 중 오류: {e}") 

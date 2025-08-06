@@ -72,39 +72,98 @@ class DeepSeekEmbeddings:
         self.api_base = api_base
         self.model_name = model_name
         self.session = None
-
+        # 연결 풀 설정 개선
+        self.connector = None
+        self.max_batch_size = 50  # 배치 크기 제한
+        
     async def _get_session(self):
-        """HTTP 세션 가져오기"""
+        """HTTP 세션 가져오기 (연결 풀링 최적화)"""
         if self.session is None:
-            self.session = aiohttp.ClientSession()
+            # 연결 풀 설정 최적화
+            if self.connector is None:
+                self.connector = aiohttp.TCPConnector(
+                    limit=100,  # 전체 연결 풀 크기
+                    limit_per_host=50,  # 호스트당 연결 수
+                    ttl_dns_cache=300,  # DNS 캐시 TTL
+                    use_dns_cache=True,
+                    keepalive_timeout=30,
+                    enable_cleanup_closed=True
+                )
+            
+            timeout = aiohttp.ClientTimeout(
+                total=120,  # 전체 타임아웃 증가
+                connect=10,
+                sock_read=30
+            )
+            
+            self.session = aiohttp.ClientSession(
+                connector=self.connector,
+                timeout=timeout
+            )
         return self.session
     
     async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
-        """문서 임베딩 생성"""
+        """문서 임베딩 생성 (배치 최적화)"""
+        if not texts:
+            return []
+            
         try:
             session = await self._get_session()
             embeddings = []
             
-            for text in texts:
-                async with session.post(
-                    f"{self.api_base}/api/embeddings",
-                    json={
-                        "model": self.model_name,
-                        "prompt": text
-                    }
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        embeddings.append(result.get("embedding", []))
-                    else:
-                        logger.error(f"DeepSeek 임베딩 생성 실패: {response.status}")
-                        # 실패 시 더미 임베딩 반환
+            # 배치 크기로 나누어 처리
+            for i in range(0, len(texts), self.max_batch_size):
+                batch_texts = texts[i:i + self.max_batch_size]
+                
+                # 배치 내에서 병렬 처리
+                batch_tasks = []
+                for text in batch_texts:
+                    task = self._embed_single_text(session, text)
+                    batch_tasks.append(task)
+                
+                # 배치 병렬 실행
+                batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+                
+                for result in batch_results:
+                    if isinstance(result, Exception):
+                        logger.error(f"DeepSeek 임베딩 생성 실패: {result}")
                         embeddings.append([0.0] * 768)
+                    else:
+                        embeddings.append(result)
             
             return embeddings
+            
         except Exception as e:
             logger.error(f"DeepSeek 임베딩 생성 중 오류: {e}")
             return [[0.0] * 768] * len(texts)
+    
+    async def _embed_single_text(self, session: aiohttp.ClientSession, text: str) -> List[float]:
+        """단일 텍스트 임베딩 생성"""
+        try:
+            async with session.post(
+                f"{self.api_base}/api/embeddings",
+                json={
+                    "model": self.model_name,
+                    "prompt": text[:8192]  # 텍스트 길이 제한
+                }
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result.get("embedding", [0.0] * 768)
+                else:
+                    error_text = await response.text()
+                    logger.error(f"DeepSeek 임베딩 API 오류 {response.status}: {error_text}")
+                    return [0.0] * 768
+                    
+        except aiohttp.ClientError as e:
+            logger.error(f"네트워크 오류 발생: {e}")
+            return [0.0] * 768
+        except asyncio.TimeoutError:
+            logger.error("임베딩 생성 타임아웃")
+            return [0.0] * 768
+        except Exception as e:
+            logger.error(f"예상치 못한 오류: {e}")
+            return [0.0] * 768
     
     async def aembed_query(self, text: str) -> List[float]:
         """쿼리 임베딩 생성"""
@@ -120,10 +179,27 @@ class DeepSeekEmbeddings:
         return asyncio.run(self.aembed_query(text))
     
     async def close(self):
-        """세션 정리"""
+        """리소스 정리"""
         if self.session:
             await self.session.close()
             self.session = None
+        if self.connector:
+            await self.connector.close()
+            self.connector = None
+    
+    def __del__(self):
+        """소멸자"""
+        try:
+            if self.session or self.connector:
+                try:
+                    loop = asyncio.get_running_loop()
+                    if not loop.is_closed():
+                        loop.create_task(self.close())
+                except RuntimeError:
+                    # 이벤트 루프가 없거나 닫혀있음 - 정상적인 상황
+                    pass
+        except Exception:
+            pass
 
 
 class DeepSeekLLM(Runnable):
@@ -852,3 +928,83 @@ class VectorService:
             
         except Exception as e:
             logger.error(f"검색 캐시 최적화 실패: {e}") 
+
+    async def store_chunks(self, chunks: List[str], metadata_list: List[Dict[str, Any]]) -> bool:
+        """청크들을 벡터 DB에 저장 (성능 최적화)"""
+        try:
+            if not chunks or not metadata_list:
+                return False
+            
+            if len(chunks) != len(metadata_list):
+                logger.error("청크와 메타데이터 개수가 일치하지 않습니다")
+                return False
+            
+            await self._ensure_chroma_initialized()
+            
+            if not self.prompt_collection:
+                logger.error("ChromaDB 컬렉션이 초기화되지 않았습니다")
+                return False
+            
+            # 대용량 배치를 작은 청크로 분할하여 처리 (ChromaDB 제한 고려)
+            batch_size = 500  # 한 번에 저장할 청크 수 증가
+            total_stored = 0
+            
+            for i in range(0, len(chunks), batch_size):
+                batch_chunks = chunks[i:i + batch_size]
+                batch_metadata = metadata_list[i:i + batch_size]
+                
+                # 임베딩 생성 (배치 처리)
+                logger.info(f"배치 {i//batch_size + 1} 임베딩 생성 중... ({len(batch_chunks)}개)")
+                embeddings = await self._generate_batch_embeddings(batch_chunks)
+                
+                if not embeddings or len(embeddings) != len(batch_chunks):
+                    logger.error(f"임베딩 생성 실패: {len(embeddings)} != {len(batch_chunks)}")
+                    continue
+                
+                # ChromaDB에 배치 저장
+                try:
+                    ids = [f"chunk_{int(time.time() * 1000000)}_{j}" for j in range(len(batch_chunks))]
+                    
+                    self.prompt_collection.add(
+                        documents=batch_chunks,
+                        metadatas=batch_metadata,
+                        embeddings=embeddings,
+                        ids=ids
+                    )
+                    
+                    total_stored += len(batch_chunks)
+                    logger.info(f"배치 저장 완료: {len(batch_chunks)}개 청크")
+                    
+                    # 메모리 압박 방지
+                    if i % (batch_size * 2) == 0 and i > 0:
+                        await asyncio.sleep(0.05)  # 50ms 대기
+                        
+                except Exception as e:
+                    logger.error(f"ChromaDB 배치 저장 실패: {e}")
+                    continue
+            
+            logger.info(f"총 {total_stored}개 청크 저장 완료")
+            return total_stored > 0
+            
+        except Exception as e:
+            logger.error(f"청크 저장 중 오류: {e}")
+            return False
+    
+    async def _generate_batch_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """배치 임베딩 생성 (최적화)"""
+        try:
+            if self.embeddings:
+                return await self.embeddings.aembed_documents(texts)
+            else:
+                # 폴백: 병렬 개별 임베딩
+                semaphore = asyncio.Semaphore(50)  # 높은 동시성
+                
+                async def embed_single(text):
+                    async with semaphore:
+                        return await self._generate_embedding(text)
+                
+                return await asyncio.gather(*[embed_single(text) for text in texts])
+                
+        except Exception as e:
+            logger.error(f"배치 임베딩 생성 실패: {e}")
+            return [[0.0] * 768] * len(texts) 

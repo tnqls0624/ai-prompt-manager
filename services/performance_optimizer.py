@@ -73,19 +73,31 @@ class LRUCache:
         if key in self.timestamps:
             del self.timestamps[key]
     
-    def clear_expired(self):
-        """만료된 항목들 정리"""
-        expired_keys = [
-            key for key in self.timestamps
-            if self._is_expired(key)
-        ]
+    def clear_expired(self) -> int:
+        """만료된 항목 정리"""
+        expired_keys = []
+        current_time = time.time()
+        
+        for key, timestamp in self.timestamps.items():
+            if (current_time - timestamp) > self.ttl_seconds:
+                expired_keys.append(key)
         
         for key in expired_keys:
+            self._remove(key)
             if key in self.access_order:
                 self.access_order.remove(key)
-            self._remove(key)
         
         return len(expired_keys)
+    
+    def clear(self):
+        """캐시 전체 초기화"""
+        self.cache.clear()
+        self.access_order.clear()
+        self.timestamps.clear()
+    
+    def size(self) -> int:
+        """캐시 크기"""
+        return len(self.cache)
     
     def stats(self) -> Dict[str, Any]:
         """캐시 통계"""
@@ -278,7 +290,8 @@ class PerformanceOptimizer:
                         logger.info(f"만료된 캐시 항목 {expired_count}개 정리")
                 
                 # 가비지 컬렉션
-                if (settings.enable_memory_optimization and 
+                if (hasattr(settings, 'enable_memory_optimization') and 
+                    settings.enable_memory_optimization and 
                     self.resource_monitor.should_trigger_gc()):
                     collected = gc.collect()
                     logger.info(f"가비지 컬렉션 완료: {collected}개 객체 해제")

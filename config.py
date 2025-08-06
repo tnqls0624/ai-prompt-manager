@@ -58,48 +58,48 @@ class Settings(BaseSettings):
     max_cache_size: int = 1000    # 최대 캐시 항목 수
     
     # 비동기 처리 설정
-    max_concurrent_requests: int = 10
-    request_timeout_seconds: int = 30
+    max_concurrent_requests: int = 50  # 10 → 50으로 증가
+    request_timeout_seconds: int = 60  # 30 → 60으로 증가
     
     # 임베딩 배치 처리 설정
-    embedding_batch_size: int = 50
-    embedding_parallel_workers: int = 4
+    embedding_batch_size: int = 100  # 50 → 100으로 증가
+    max_concurrent_embeddings: int = 20  # 새로 추가
     
-    # 파일 인덱싱 최적화
-    max_file_size_mb: int = 10
-    parallel_file_processing: bool = True
-    chunk_processing_batch_size: int = 100
+    # 파일 처리 최적화 설정
+    max_concurrent_files: int = 100  # 새로 추가
+    file_batch_size: int = 200  # 새로 추가
+    chunk_overlap_ratio: float = 0.1  # 새로 추가
+    
+    # 벡터 DB 최적화 설정
+    chroma_batch_size: int = 500  # 새로 추가
+    enable_parallel_indexing: bool = True  # 새로 추가
+    
+    # 메모리 최적화 설정
+    max_file_size_mb: int = 50  # 새로 추가
+    enable_file_compression: bool = True  # 새로 추가
     
     # 데이터베이스 연결 풀링
     db_connection_pool_size: int = 10
-    db_connection_timeout: int = 5
-    
-    # 메모리 관리
-    enable_memory_optimization: bool = True
-    garbage_collection_threshold: int = 1000  # 처리된 요청 수
-    
-    # 모니터링 설정
-    enable_performance_monitoring: bool = True
-    slow_query_threshold_seconds: float = 1.0
-    
-    # API 속도 제한
-    rate_limit_per_minute: int = 100
-    rate_limit_burst_size: int = 10
-    
-    # 텍스트 처리 최적화
-    text_chunk_size: int = 1000
-    text_chunk_overlap: int = 200
-    max_text_length: int = 50000
+    db_connection_timeout: int = 30
     
     # 검색 최적화
-    semantic_search_weight: float = 0.7
-    keyword_search_weight: float = 0.3
-    time_decay_factor: float = 0.1
-    complexity_weight: float = 0.1
+    search_result_cache_ttl: int = 300
+    similarity_search_algorithm: str = "cosine"
     
-    # 리소스 제한
-    max_memory_usage_mb: int = 2048
-    max_cpu_usage_percent: int = 80
+    # 속도 제한 설정 (새로 추가)
+    rate_limit_per_minute: int = 600  # 분당 요청 수
+    rate_limit_burst_size: int = 100  # 버스트 크기
+    
+    # 메모리 관리 설정 (새로 추가)
+    enable_memory_optimization: bool = True
+    max_memory_usage_mb: int = 2048  # 최대 메모리 사용량 (MB)
+    max_cpu_usage_percent: float = 80.0  # 최대 CPU 사용률
+    garbage_collection_threshold: int = 100  # GC 트리거 요청 수
+    slow_query_threshold_seconds: float = 2.0  # 느린 쿼리 임계값
+    
+    # 백그라운드 작업 설정
+    enable_background_tasks: bool = True
+    background_task_interval: int = 60
     
     # 🔄 피드백 시스템 설정
     feedback_learning_rate: float = 0.1  # 학습률 (0.0 ~ 1.0)

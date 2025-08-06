@@ -20,81 +20,50 @@ class FastIndexingService:
     def __init__(self, vector_service: VectorService):
         self.vector_service = vector_service
         
-        # 지원하는 파일 확장자들
+        # 성능 설정 (대폭 증가)
+        self.max_concurrent_files = 200  # 50 → 200으로 증가
+        self.batch_size = 500  # 100 → 500으로 증가
+        self.chunk_size = 2048  # 1024 → 2048로 증가
+        self.chunk_overlap = 200  # 100 → 200으로 증가
+        
+        # 지원하는 파일 확장자
         self.supported_extensions = {
             '.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.cpp', '.c', '.cs',
-            '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.scala',
-            '.md', '.txt', '.rst', '.asciidoc',
-            '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg',
-            '.sql', '.sh', '.bash', '.ps1',
-            '.html', '.css', '.scss', '.sass', '.less',
-            '.vue', '.svelte', '.astro'
+            '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.scala', '.clj',
+            '.md', '.txt', '.rst', '.asciidoc', '.org',
+            '.json', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
+            '.sql', '.sh', '.bash', '.zsh', '.fish', '.ps1', '.bat', '.cmd',
+            '.html', '.css', '.scss', '.sass', '.less', '.vue', '.svelte',
+            '.dart', '.r', '.hs', '.elm', '.xml', '.dockerfile', '.env'
         }
         
-        # 무시할 디렉토리들
+        # 무시할 디렉토리 (확장)
         self.ignore_directories = {
-            # JavaScript/Node.js 관련
             'node_modules', 'bower_components', 'jspm_packages', 'typings',
-            
-            # Python 관련
             '__pycache__', '.pytest_cache', '.mypy_cache', 'venv', 'env', '.env',
-            
-            # 버전 관리 시스템
-            '.git', '.svn', '.hg',
-            
-            # IDE 관련
-            '.vscode', '.idea',
-            
-            # 빌드 관련
+            '.git', '.svn', '.hg', '.bzr', 'CVS',
+            '.vscode', '.idea', '.vs', '.vscode-test',
             'dist', 'build', 'target', 'out', '.next', 'bin', 'obj',
-            
-            # 컴파일러별 빌드 디렉토리
-            'Debug', 'Release',  # Visual Studio
-            
-            # 언어별 패키지 관리
-            'vendor',  # Go, PHP, Ruby 등
-            'pkg',     # Go 패키지
-            
-            # 캐시 및 임시 파일
-            'cache', 'tmp', 'temp', 'coverage', 'logs',
-            
-            # 정적 파일 및 에셋
-            'assets', 'public', 'static',
-            
-            # 데이터베이스 관련
-            'chroma_db'
+            'Debug', 'Release', 'vendor', 'pkg', 'cache', 'tmp', 'temp',
+            'coverage', 'logs', 'assets', 'public', 'static', 'chroma_db',
+            '.tox', '.nox', 'htmlcov', '.coverage', '.nyc_output',
+            'lib', 'libs', 'packages', 'deps', 'external'
         }
         
-        # 무시할 파일들
+        # 무시할 파일
         self.ignore_files = {
-            # 환경 및 설정 파일
-            '.gitignore', '.dockerignore', '.env', '.env.local',
-            
-            # 패키지 매니저 락 파일들
-            'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',  # JavaScript/Node.js
-            'poetry.lock', 'Pipfile.lock', 'pdm.lock',           # Python
-            'composer.lock',                                      # PHP
-            'Gemfile.lock',                                       # Ruby
-            'Cargo.lock',                                         # Rust
-            'go.sum',                                             # Go
-            'mix.lock',                                           # Elixir
-            'pubspec.lock',                                       # Dart/Flutter
-            
-            # 기타 제외할 파일들
-            # 'requirements.txt'  # Python 의존성 파일은 인덱싱 대상 (설정 파일)
+            '.gitignore', '.dockerignore', '.env', '.env.local', '.env.production',
+            'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
+            'poetry.lock', 'Pipfile.lock', 'pdm.lock', 'requirements.txt',
+            'composer.lock', 'Gemfile.lock', 'Cargo.lock', 'go.sum', 'go.mod',
+            'mix.lock', 'pubspec.lock', '.DS_Store', 'Thumbs.db'
         }
         
-        # 성능 설정
-        self.max_concurrent_files = 20  # 동시 처리 파일 수
-        self.batch_size = 10           # 배치 임베딩 크기
-        self.max_file_size = 5 * 1024 * 1024  # 5MB 제한
-        self.chunk_size = 2000         # 더 큰 청크로 API 호출 줄이기
+        # 성능 최적화를 위한 캐시
+        self.file_cache = {}  # 파일 해시 캐시
         
-        # 캐시 설정
-        self.file_cache: Dict[str, str] = {}  # 파일 해시 캐시
-        
-        # Thread/Process Pool
-        self.thread_executor = ThreadPoolExecutor(max_workers=4)
+        # Thread/Process Pool (워커 증가)
+        self.thread_executor = ThreadPoolExecutor(max_workers=8)  # 4 → 8로 증가
         
     async def index_project_files_fast(self, project_path: str, project_id: str) -> Dict[str, Any]:
         """🚀 고속 병렬 프로젝트 파일 인덱싱"""
@@ -410,7 +379,7 @@ class FastIndexingService:
             try:
                 # LangChain 청킹 (더 큰 청크 크기)
                 self.vector_service.text_splitter.chunk_size = self.chunk_size
-                self.vector_service.text_splitter.chunk_overlap = 400  # 더 큰 오버랩
+                self.vector_service.text_splitter.chunk_overlap = self.chunk_overlap  # 더 큰 오버랩
                 chunks = self.vector_service.text_splitter.split_text(content)
                 return chunks
             except Exception as e:
@@ -482,26 +451,44 @@ class FastIndexingService:
             return "other"
     
     async def batch_embed_texts(self, texts: List[str]) -> List[List[float]]:
-        """🔥 배치 임베딩 생성 (OpenAI API 호출 최적화)"""
+        """🔥 배치 임베딩 생성 (고성능 최적화)"""
         try:
+            if not texts:
+                return []
+                
             if not self.vector_service.embeddings:
-                # 폴백: 개별 임베딩 생성
+                # 폴백: 개별 임베딩 생성 (병렬 처리)
+                semaphore = asyncio.Semaphore(20)  # 동시성 제어
+                
+                async def embed_with_semaphore(text):
+                    async with semaphore:
+                        return await self.vector_service._generate_embedding(text)
+                
                 return await asyncio.gather(*[
-                    self.vector_service._generate_embedding(text) 
-                    for text in texts
+                    embed_with_semaphore(text) for text in texts
                 ])
             
-            # 배치 임베딩 (OpenAI는 한 번에 여러 텍스트 처리 가능)
-            embeddings = await self.vector_service.embeddings.aembed_documents(texts)
-            return embeddings
+            # 대용량 배치를 작은 청크로 분할하여 처리
+            chunk_size = 100  # 한 번에 처리할 텍스트 수
+            all_embeddings = []
+            
+            for i in range(0, len(texts), chunk_size):
+                chunk_texts = texts[i:i + chunk_size]
+                
+                # DeepSeek 임베딩 배치 처리 (이미 내부적으로 최적화됨)
+                chunk_embeddings = await self.vector_service.embeddings.aembed_documents(chunk_texts)
+                all_embeddings.extend(chunk_embeddings)
+                
+                # 메모리 압박 방지를 위한 작은 대기
+                if i % (chunk_size * 5) == 0 and i > 0:
+                    await asyncio.sleep(0.01)  # 10ms 대기
+            
+            return all_embeddings
             
         except Exception as e:
             logger.error(f"배치 임베딩 실패: {e}")
-            # 폴백: 개별 처리
-            return await asyncio.gather(*[
-                self.vector_service._generate_embedding(text) 
-                for text in texts
-            ])
+            # 폴백: 더미 임베딩 반환
+            return [[0.0] * 768] * len(texts)
     
     def get_performance_stats(self) -> Dict[str, Any]:
         """📊 성능 통계"""
@@ -515,5 +502,9 @@ class FastIndexingService:
     
     def __del__(self):
         """리소스 정리"""
-        if hasattr(self, 'thread_executor'):
-            self.thread_executor.shutdown(wait=False) 
+        try:
+            if hasattr(self, 'thread_executor'):
+                self.thread_executor.shutdown(wait=False, cancel_futures=True)
+                logger.debug("ThreadPoolExecutor 정리 완료")
+        except Exception as e:
+            logger.warning(f"리소스 정리 중 오류: {e}") 

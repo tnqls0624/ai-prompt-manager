@@ -10,6 +10,8 @@ services:
     environment:
       - OLLAMA_HOST=0.0.0.0
       - OLLAMA_PORT=11434
+      - OLLAMA_MAX_LOADED_MODELS=2 # 동시 로드 모델 수 증가
+      - OLLAMA_NUM_PARALLEL=4 # 병렬 처리 증가
     volumes:
       - ./data/ollama:/root/.ollama
     restart: unless-stopped
@@ -21,6 +23,13 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    # 리소스 제한 설정
+    deploy:
+      resources:
+        limits:
+          memory: 8G # 메모리 제한
+        reservations:
+          memory: 4G # 최소 메모리 보장
     # GPU 지원 (선택사항)
     # deploy:
     #   resources:
@@ -39,6 +48,10 @@ services:
     environment:
       - CHROMA_SERVER_HOST=0.0.0.0
       - CHROMA_SERVER_HTTP_PORT=8000
+      - CHROMA_SERVER_CORS_ALLOW_ORIGINS=["*"]
+      # 성능 최적화 설정
+      - CHROMA_SERVER_MAX_BATCH_SIZE=1000 # 배치 크기 증가
+      - CHROMA_SERVER_THREAD_POOL_SIZE=10 # 스레드 풀 크기 증가
     volumes:
       # 🔒 호스트 경로에 직접 바인딩 (데이터 안전성)
       - ./data/chroma:/data
@@ -47,6 +60,15 @@ services:
     restart: unless-stopped
     networks:
       - mcp-network
+    # 리소스 제한 설정
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2"
+        reservations:
+          memory: 2G
+          cpus: "1"
 
   # FastMCP 서버 (ChromaDB 준비 후 시작)
   fastmcp-server:
@@ -85,6 +107,13 @@ services:
       - ENABLE_ADVANCED_ANALYTICS=${ENABLE_ADVANCED_ANALYTICS:-true}
       - CLUSTERING_ALGORITHM=${CLUSTERING_ALGORITHM:-kmeans}
       - MAX_CLUSTERS=${MAX_CLUSTERS:-10}
+
+      # ⚡ 성능 최적화 환경변수 추가
+      - MAX_CONCURRENT_REQUESTS=100
+      - MAX_CONCURRENT_FILES=200
+      - EMBEDDING_BATCH_SIZE=100
+      - CHROMA_BATCH_SIZE=500
+      - ENABLE_PARALLEL_INDEXING=true
     volumes:
       # 🗂️ 로그 및 데이터 저장을 위한 볼륨 마운트
       - ./data:/data
@@ -113,6 +142,15 @@ services:
       - deepseek-r1
     networks:
       - mcp-network
+    # 리소스 제한 설정
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+          cpus: "4"
+        reservations:
+          memory: 3G
+          cpus: "2"
 
 networks:
   mcp-network:
