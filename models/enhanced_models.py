@@ -124,3 +124,21 @@ class AdvancedRAGResponse(BaseModel):
     optimization_suggestions: List[str] = Field(default_factory=list, description="최적화 제안")
     performance_prediction: PerformanceMetric = Field(description="성능 예측")
     learning_opportunities: List[LearningInsight] = Field(default_factory=list, description="학습 기회") 
+
+
+# --- Code edit schema for generate-edit endpoint ---
+class CodeEdit(BaseModel):
+    file_path: str = Field(description="대상 파일 경로")
+    start_line: int = Field(ge=1, description="시작 라인(1-base)")
+    end_line: int = Field(ge=1, description="종료 라인(1-base, 포함)")
+    new_text: str = Field(description="대체할 새 텍스트")
+
+    def normalize(self) -> "CodeEdit":
+        # 보정: end_line < start_line이면 start_line로 맞춤
+        if self.end_line < self.start_line:
+            self.end_line = self.start_line
+        return self
+
+class CodeEditsResponse(BaseModel):
+    edits: List[CodeEdit] = Field(default_factory=list)
+    explanations: List[str] = Field(default_factory=list)

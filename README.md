@@ -84,6 +84,14 @@ The server uses LLM in two modes:
 - `/api/v1/feedback` - Feedback submission
 - `/api/v1/heartbeat` - Server health check
 - `/api/v1/validate` - System/indexing/LLM health and readiness check
+- `/api/v1/resource/snippet` - Return a file snippet by path and line range
+- `/api/v1/rag/generate-edit` - Generate minimal JSON edits for code changes
+- `/metrics` - Prometheus metrics (optional)
+- `/dashboard` - Simple HTML dashboard (auto refresh)
+- `/api/v1/index/warmup/{project_id}` - Build TF-IDF/BM25 caches for a project
+- `/api/v1/audit/recent` - Recent audit items (JSONL)
+- `/api/v1/audit/search` - Search audit logs by project/event/since
+- `/dashboard` - Simple HTML dashboard (auto refresh)
 
 ### 3. Services
 
@@ -108,6 +116,7 @@ Optimized for high throughput with actual benchmarks:
 - **Hybrid Search**: Parallel semantic + TF-IDF with project-scoped cache
 - **Reranking**: Tunable weights for semantic/keyword/recency/complexity
 - **TF-IDF Index**: Cached per project with TTL to avoid recomputation
+- **Persistent Index Cache**: Vectorizer + matrix persisted under `cache_dir`
 
 ## Quick Start
 
@@ -167,6 +176,29 @@ environment:
   - RECENCY_WEIGHT=0.1
   - COMPLEXITY_WEIGHT=0.1
   - TFIDF_INDEX_TTL_SECONDS=300
+  - CACHE_DIR=/data/cache
+
+  # Warmup at start (optional)
+  - WARMUP_ON_START=false
+  - WARMUP_PROJECT_IDS=my-project,another-project
+
+  # Audit log (optional)
+  - AUDIT_LOG_ENABLED=false
+
+  # Auth (disabled by default)
+  - REQUIRE_API_KEY=false
+  - API_KEY=
+  - JWT_ENABLED=false
+  - JWT_SECRET=
+  - JWT_ALGORITHMS=HS256
+  - PROJECT_QUOTA_PER_MINUTE=0
+
+  # Warmup at start (optional)
+  - WARMUP_ON_START=false
+  - WARMUP_PROJECT_IDS=my-project,another-project
+
+  # Audit log (optional)
+  - AUDIT_LOG_ENABLED=false
 ```
 
 **Note**: Variable names use "deepseek" prefix for historical reasons. Actual models:
@@ -239,6 +271,38 @@ result = await enhance_prompt(
 ```
 
 #### Generate Test Skeleton (TDD Red phase helper):
+
+#### Streamed Code Generation (SSE):
+
+```bash
+curl -N -X POST http://localhost:8000/api/v1/rag/generate-code \
+  -H 'content-type: application/json' \
+  -d '{
+        "prompt":"Implement user login API",
+        "project_id":"my-project",
+        "context_limit":5,
+        "stream":true
+      }'
+```
+
+#### Get File Snippet:
+
+```bash
+curl "http://localhost:8000/api/v1/resource/snippet?file_path=/host_projects/myproj/app.py&start_line=10&end_line=60"
+```
+
+#### Generate Minimal JSON Edits:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/rag/generate-edit \
+  -H 'content-type: application/json' \
+  -d '{
+        "instruction":"Rename function foo to fetch_user",
+        "project_id":"my-project",
+        "file_path":"/host_projects/myproj/app.py",
+        "diff_context":"def foo(...):\n    pass\n"
+      }'
+```
 
 ```python
 result = await generate_test_skeleton(
@@ -323,6 +387,12 @@ curl http://localhost:8001/api/v1/heartbeat
 
 # System validation (LLM/indexing/errors/perf)
 curl "http://localhost:8000/api/v1/validate?project_id=my-project"
+
+# Prometheus metrics (optional)
+curl http://localhost:8000/metrics
+
+# Simple Dashboard (auto refresh)
+open http://localhost:8000/dashboard
 ```
 
 ## Known Limitations

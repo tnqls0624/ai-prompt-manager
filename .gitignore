@@ -130,6 +130,8 @@ env/
 ENV/
 .venv/
 .env/
+.history/
+monitoring/grafana/
 
 # Environment Variables
 .env.local

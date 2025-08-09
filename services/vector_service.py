@@ -8,6 +8,8 @@ import asyncio
 import re
 from datetime import datetime, timedelta
 import time
+import json as _json
+from pathlib import Path as _Path
 
 # 선택적 임포트
 try:
@@ -63,6 +65,30 @@ try:
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
+try:
+    from joblib import dump as _joblib_dump, load as _joblib_load
+    JOBLIB_AVAILABLE = True
+except ImportError:
+    JOBLIB_AVAILABLE = False
+try:
+    import scipy.sparse as _sp
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+
+# BM25 (선택적)
+try:
+    from rank_bm25 import BM25Okapi
+    BM25_AVAILABLE = True
+except ImportError:
+    BM25_AVAILABLE = False
+
+# Cross-Encoder 재랭킹 (선택적)
+try:
+    from sentence_transformers import CrossEncoder
+    CROSS_ENCODER_AVAILABLE = True
+except ImportError:
+    CROSS_ENCODER_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -378,10 +404,24 @@ class VectorService:
                 stop_words='english',
                 ngram_range=(1, 2)
             )
+        # BM25 인덱스 캐시
+        self._bm25_index_cache = {}
+        # 교차-인코더 (선택)
+        self._cross_encoder = None
+        if CROSS_ENCODER_AVAILABLE:
+            try:
+                self._cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+            except Exception:
+                self._cross_encoder = None
         
         # 검색 성능 최적화를 위한 캐시
         self.search_cache = {}
         self.cache_ttl = 300  # 5분
+        self.cache_dir = _Path(getattr(settings, 'cache_dir', '/data/cache'))
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
         
         # ChromaDB 초기화 시도
         if CHROMADB_AVAILABLE:
@@ -473,6 +513,23 @@ class VectorService:
                 # 임베딩 생성
                 embedding = await self._generate_embedding(prompt_history.content)
                 
+                # 시크릿 마스킹
+                content_to_store = self._mask_secrets(prompt_history.content)
+
+                # 중복 제거 (콘텐츠 해시)
+                import hashlib as _hashlib
+                content_hash = _hashlib.md5(content_to_store.encode('utf-8')).hexdigest()
+                try:
+                    exists = self.prompt_collection.get(
+                        where={"project_id": prompt_history.project_id, "content_hash": content_hash},
+                        include=["metadatas"]
+                    )
+                    if exists and exists.get("metadatas"):
+                        logger.info("동일 콘텐츠 해시가 이미 존재하여 저장을 건너뜁니다")
+                        return True
+                except Exception:
+                    pass
+
                 # 메타데이터 강화
                 enhanced_metadata = {
                     "id": prompt_history.id,
@@ -483,12 +540,13 @@ class VectorService:
                     "word_count": len(prompt_history.content.split()),
                     "has_code": self._contains_code(prompt_history.content),
                     "complexity_score": self._calculate_text_complexity(prompt_history.content),
+                    "content_hash": content_hash,
                     **prompt_history.metadata
                 }
                 
                 # ChromaDB에 저장
                 self.prompt_collection.add(
-                    documents=[prompt_history.content],
+                    documents=[content_to_store],
                     embeddings=[embedding],
                     metadatas=[enhanced_metadata],
                     ids=[prompt_history.id]
@@ -642,15 +700,41 @@ class VectorService:
             index_entry = self._tfidf_index_cache.get(project_id)
             now_ts = datetime.now().timestamp()
             index_ttl = getattr(settings, 'tfidf_index_ttl_seconds', 300)
-            if not index_entry or now_ts - index_entry.get('built_at', 0) > index_ttl or len(index_entry.get('documents', [])) != len(documents):
+            vec_path = self.cache_dir / f"tfidf_vectorizer_{project_id}.joblib"
+            mtx_path = self.cache_dir / f"tfidf_matrix_{project_id}.npz"
+            docs_path = self.cache_dir / f"tfidf_documents_{project_id}.json"
+
+            loaded_persisted = False
+            if (JOBLIB_AVAILABLE and SCIPY_AVAILABLE and vec_path.exists() and mtx_path.exists() and docs_path.exists()):
+                try:
+                    ts = vec_path.stat().st_mtime
+                    if now_ts - ts <= index_ttl:
+                        vec = _joblib_load(vec_path)
+                        tfidf_matrix_all = _sp.load_npz(mtx_path)
+                        with open(docs_path, 'r') as f:
+                            persisted_docs = _json.load(f)
+                        if len(persisted_docs) == len(documents):
+                            self.tfidf_vectorizer = vec
+                            loaded_persisted = True
+                except Exception:
+                    loaded_persisted = False
+
+            if not loaded_persisted:
                 tfidf_matrix_all = self.tfidf_vectorizer.fit_transform(documents)
                 self._tfidf_index_cache[project_id] = {
                     'built_at': now_ts,
                     'tfidf_matrix': tfidf_matrix_all,
                     'documents': documents
                 }
-            else:
-                tfidf_matrix_all = index_entry['tfidf_matrix']
+                # 디스크 캐시 저장 (vectorizer + matrix + docs)
+                if JOBLIB_AVAILABLE and SCIPY_AVAILABLE:
+                    try:
+                        _joblib_dump(self.tfidf_vectorizer, vec_path)
+                        _sp.save_npz(mtx_path, tfidf_matrix_all)
+                        with open(docs_path, 'w') as f:
+                            _json.dump(documents, f)
+                    except Exception:
+                        pass
 
             # 쿼리 벡터는 기존 vocabulary에 맞춰 transform
             query_vector = self.tfidf_vectorizer.transform([query])
@@ -675,6 +759,76 @@ class VectorService:
             
         except Exception as e:
             logger.error(f"키워드 검색 실패: {e}")
+            return []
+
+    async def _bm25_search(
+        self,
+        query: str,
+        project_id: str,
+        limit: int
+    ) -> List[Dict[str, Any]]:
+        """BM25 기반 검색 (선택적)"""
+        try:
+            if not BM25_AVAILABLE:
+                return []
+            all_results = self.prompt_collection.get(
+                where={"project_id": project_id},
+                include=["documents", "metadatas"]
+            )
+            if not all_results["documents"]:
+                return []
+            documents = all_results["documents"]
+            metadatas = all_results["metadatas"]
+
+            index_entry = self._bm25_index_cache.get(project_id)
+            now_ts = datetime.now().timestamp()
+            tokens_path = self.cache_dir / f"bm25_tokens_{project_id}.json"
+            if not index_entry or now_ts - index_entry.get('built_at', 0) > getattr(settings, 'tfidf_index_ttl_seconds', 300) or len(index_entry.get('documents', [])) != len(documents):
+                try:
+                    if tokens_path.exists():
+                        ts = tokens_path.stat().st_mtime
+                        if now_ts - ts <= getattr(settings, 'tfidf_index_ttl_seconds', 300):
+                            with open(tokens_path, 'r') as f:
+                                tokenized = _json.load(f)
+                        else:
+                            tokenized = [doc.split() for doc in documents]
+                    else:
+                        tokenized = [doc.split() for doc in documents]
+                    # 저장
+                    try:
+                        with open(tokens_path, 'w') as f:
+                            _json.dump(tokenized, f)
+                    except Exception:
+                        pass
+                except Exception:
+                    tokenized = [doc.split() for doc in documents]
+
+                bm25 = BM25Okapi(tokenized)
+                self._bm25_index_cache[project_id] = {
+                    'built_at': now_ts,
+                    'bm25': bm25,
+                    'documents': documents,
+                    'metadatas': metadatas
+                }
+            else:
+                bm25 = index_entry['bm25']
+                metadatas = index_entry['metadatas']
+                documents = index_entry['documents']
+
+            scores = bm25.get_scores(query.split())
+            ranked_indices = np.argsort(scores)[::-1][:limit]
+            results = []
+            for idx in ranked_indices:
+                if scores[idx] > 0.0:
+                    results.append({
+                        "content": documents[idx],
+                        "metadata": metadatas[idx],
+                        "similarity": float(scores[idx]),
+                        "search_type": "bm25"
+                    })
+            return results
+        except Exception as e:
+            logger.error(f"BM25 검색 실패: {e}")
             return []
     
     def _combine_and_rerank(
@@ -742,6 +896,16 @@ class VectorService:
                 complexity_score * w_cplx
             )
         
+        # 교차-인코더 재랭킹 (선택)
+        if self._cross_encoder and combined_results:
+            try:
+                pairs = [(query, r["content"]) for r in combined_results.values()]
+                ce_scores = self._cross_encoder.predict(pairs)
+                for (rid, r), s in zip(combined_results.items(), ce_scores):
+                    r["final_score"] = float(0.8 * r["final_score"] + 0.2 * s)
+            except Exception:
+                pass
+
         # 최종 점수로 정렬
         sorted_results = sorted(
             combined_results.values(), 
@@ -821,14 +985,49 @@ class VectorService:
                 ids=[project_id],
                 include=["documents", "metadatas"]
             )
-            
-            if results["documents"]:
+            if results.get("documents"):
                 return {
                     "content": results["documents"][0],
                     "metadata": results["metadatas"][0]
                 }
             return None
-            
+        except Exception as e:
+            logger.error(f"프로젝트 컨텍스트 조회 실패: {e}")
+            return None
+    async def warmup_project_indices(self, project_id: str) -> Dict[str, Any]:
+        """프로젝트 인덱스(TFIDF/BM25) 워밍업 및 캐시 구축"""
+        summary: Dict[str, Any] = {"project_id": project_id, "tfidf": False, "bm25": False}
+        try:
+            # 모든 문서 조회
+            all_results = self.prompt_collection.get(
+                where={"project_id": project_id},
+                include=["documents", "metadatas"]
+            )
+            documents = all_results.get("documents") or []
+            metadatas = all_results.get("metadatas") or []
+            if not documents:
+                return {**summary, "message": "no documents"}
+
+            # TF-IDF 캐시 생성 (fit)
+            if SKLEARN_AVAILABLE:
+                try:
+                    _ = await self._keyword_search("warmup", project_id, limit=1)
+                    summary["tfidf"] = True
+                except Exception:
+                    summary["tfidf"] = False
+
+            # BM25 캐시 생성
+            try:
+                _ = await self._bm25_search("warmup", project_id, limit=1)
+                summary["bm25"] = True
+            except Exception:
+                summary["bm25"] = False
+
+            return {**summary, "success": True, "doc_count": len(documents)}
+        except Exception as e:
+            logger.warning(f"warmup_project_indices failed: {e}")
+            return {**summary, "success": False, "error": str(e)}
+
         except Exception as e:
             logger.error(f"프로젝트 컨텍스트 조회 실패: {e}")
             return None
@@ -1020,6 +1219,7 @@ class VectorService:
                 semaphore = asyncio.Semaphore(50)  # 높은 동시성
                 
                 async def embed_single(text):
+                    text = self._mask_secrets(text)
                     async with semaphore:
                         return await self._generate_embedding(text)
                 
@@ -1028,3 +1228,19 @@ class VectorService:
         except Exception as e:
             logger.error(f"배치 임베딩 생성 실패: {e}")
             return [[0.0] * 768] * len(texts) 
+
+    def _mask_secrets(self, text: str) -> str:
+        """간단한 시크릿 마스킹 (API 키/토큰 정규식 기반)"""
+        try:
+            patterns = [
+                r'(?:api[_-]?key|access[_-]?key|secret|token)\s*[:=]\s*[A-Za-z0-9_\-]{16,}',
+                r'AIza[0-9A-Za-z\-_]{35}',  # Google API key
+                r'sk-[A-Za-z0-9]{20,}',       # OpenAI style
+                r'ghp_[A-Za-z0-9]{36,}',      # GitHub PAT
+            ]
+            masked = text
+            for p in patterns:
+                masked = re.sub(p, '[REDACTED_SECRET]', masked, flags=re.IGNORECASE)
+            return masked
+        except Exception:
+            return text

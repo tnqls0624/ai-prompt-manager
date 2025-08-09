@@ -92,10 +92,22 @@ class Settings(BaseSettings):
     complexity_weight: float = 0.1
     # TF-IDF 인덱스 TTL (초)
     tfidf_index_ttl_seconds: int = 300
+    # 퍼시스턴트 캐시 디렉토리
+    cache_dir: str = "/data/cache"
     
     # 속도 제한 설정 (새로 추가)
     rate_limit_per_minute: int = 600  # 분당 요청 수
     rate_limit_burst_size: int = 100  # 버스트 크기
+    # 인증 설정
+    require_api_key: bool = False
+    api_key: Optional[str] = None
+    jwt_enabled: bool = False
+    jwt_secret: Optional[str] = None
+    jwt_algorithms: str = "HS256"
+    # 프로젝트별 쿼터 (분당). 0 또는 None이면 비활성화
+    project_quota_per_minute: int = 0
+    # 감사 로그
+    audit_log_enabled: bool = False
     
     # 메모리 관리 설정 (새로 추가)
     enable_memory_optimization: bool = True
@@ -107,6 +119,8 @@ class Settings(BaseSettings):
     # 백그라운드 작업 설정
     enable_background_tasks: bool = True
     background_task_interval: int = 60
+    warmup_on_start: bool = False
+    warmup_project_ids: Optional[str] = None  # comma-separated project ids
     
     # 🔄 피드백 시스템 설정
     feedback_learning_rate: float = 0.1  # 학습률 (0.0 ~ 1.0)

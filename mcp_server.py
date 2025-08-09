@@ -13,7 +13,13 @@ import asyncio
 import json
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
+from starlette.responses import Response
+try:
+    import jwt as _jwt
+except ImportError:
+    _jwt = None
 from sse_starlette import EventSourceResponse
+import difflib
 import time
 from pathlib import Path
 import aiofiles
@@ -22,6 +28,11 @@ from datetime import datetime
 import aiohttp
 import math
 from collections import defaultdict, deque
+try:
+    from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    _PROM_AVAILABLE = True
+except ImportError:
+    _PROM_AVAILABLE = False
 
 # 기존 서비스들 import
 from services.vector_service import VectorService
@@ -80,6 +91,31 @@ error_file_handler = RotatingFileHandler(
 error_file_handler.setFormatter(log_formatter)
 error_file_handler.setLevel(logging.ERROR)
 
+# 감사 로그 파일 경로 (JSONL)
+audit_log_path = os.path.join(log_dir, "audit.jsonl")
+
+def _project_audit_path(project_id: str) -> str:
+    safe_id = (project_id or "default").replace("/", "_")[:64]
+    return os.path.join(log_dir, f"audit_{safe_id}.jsonl")
+
+async def _rotate_if_needed(path: str, max_bytes: int = 5 * 1024 * 1024, backups: int = 1) -> None:
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > max_bytes:
+            for i in range(backups, 0, -1):
+                src = f"{path}.{i}" if i > 0 else path
+                dst = f"{path}.{i+1}"
+                if os.path.exists(src):
+                    try:
+                        os.replace(src, dst)
+                    except Exception:
+                        pass
+            try:
+                os.replace(path, f"{path}.1")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 # 로깅 설정
 logging.basicConfig(
     level=getattr(logging, settings.log_level),
@@ -119,6 +155,7 @@ active_connections: Dict[str, asyncio.Queue] = {}
 
 # 간단한 레이트 리미터 (분당 요청 수 + 버스트 제한)
 _rate_limit_buckets: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+_project_quota_buckets: Dict[str, deque] = defaultdict(lambda: deque(maxlen=2000))
 
 def _get_client_key(request: Request) -> str:
     try:
@@ -146,6 +183,214 @@ def _check_rate_limit(request: Request) -> bool:
     bucket.append(now)
     return True
 
+def _check_project_quota(project_id: str) -> bool:
+    quota = getattr(settings, 'project_quota_per_minute', 0) or 0
+    if quota <= 0:
+        return True
+    now = time.time()
+    bucket = _project_quota_buckets[project_id]
+    while bucket and now - bucket[0] > 60.0:
+        bucket.popleft()
+    if len(bucket) >= quota:
+        return False
+    bucket.append(now)
+    return True
+
+# ---------------------------------------------------------------------------
+# Metrics (Prometheus optional)
+# ---------------------------------------------------------------------------
+if _PROM_AVAILABLE:
+    REQUEST_COUNT = Counter('mcp_requests_total', 'Total requests', ['endpoint'])
+    REQUEST_LATENCY = Histogram('mcp_request_latency_seconds', 'Request latency in seconds', ['endpoint'])
+    REQUEST_ERRORS = Counter('mcp_request_errors_total', 'Total server errors', ['endpoint'])
+else:
+    REQUEST_COUNT = None
+    REQUEST_LATENCY = None
+    REQUEST_ERRORS = None
+
+class _RequestTimer:
+    def __init__(self, endpoint: str):
+        self.endpoint = endpoint
+        self._ctx = None
+    def __enter__(self):
+        if REQUEST_LATENCY:
+            self._ctx = REQUEST_LATENCY.labels(self.endpoint).time()
+            self._ctx.__enter__()
+        return self
+    def __exit__(self, exc_type, exc, tb):
+        if self._ctx:
+            self._ctx.__exit__(exc_type, exc, tb)
+
+# ---------------------------------------------------------------------------
+# RAG: Generate minimal edits (code edit endpoint)
+# ---------------------------------------------------------------------------
+@mcp.custom_route(path="/api/v1/rag/generate-edit", methods=["POST"])
+@handle_errors(
+    category=ErrorCategory.AI_SERVICE,
+    level=ErrorLevel.MEDIUM,
+    user_message="RAG 기반 코드 에디트 생성 중 오류가 발생했습니다."
+)
+@measure_performance(operation_name="rag_generate_edit", threshold=10.0)
+async def rag_generate_edit(request):
+    """RAG 기반 코드 에디트(JSON edits) 생성 엔드포인트"""
+    try:
+        await ensure_services_initialized()
+        if not _check_api_key(request) or not _check_jwt(request):
+            return JSONResponse({"error": "Unauthorized", "success": False}, status_code=401)
+        if REQUEST_COUNT:
+            REQUEST_COUNT.labels('/api/v1/rag/generate-edit').inc()
+
+        data = await request.json()
+        instruction = data.get("instruction", "").strip()
+        project_id = data.get("project_id", "default")
+        file_path = data.get("file_path")
+        diff_context = data.get("diff_context", "")
+        context_limit = int(data.get("context_limit", 5))
+        include_snippet = bool(data.get("include_snippet", True))
+
+        if not instruction:
+            return JSONResponse({"error": "instruction is required", "success": False}, status_code=400)
+
+        # 컨텍스트 수집
+        with _RequestTimer('/api/v1/rag/generate-edit'):
+            enhanced = await langchain_rag_service.generate_enhanced_prompt(
+                user_prompt=instruction,
+                project_id=project_id,
+                context_limit=context_limit
+            )
+            head_snippet = None
+            if file_path and include_snippet:
+                head_snippet = await _read_head_snippet(file_path, max_lines=200)
+
+            # LLM 사용 시 JSON edits 생성 시도
+            try:
+                if getattr(langchain_rag_service, 'llm', None):
+                    import json as _json
+                    prompt = (
+                        "You are a code refactoring assistant. Generate a minimal set of edits in strict JSON.\n"
+                        "Schema: {\"edits\":[{\"file_path\":string,\"start_line\":number,\"end_line\":number,\"new_text\":string}],\"explanations\":[string]}\n"
+                        "Only output the JSON. No prose.\n\n"
+                        f"Instruction: {instruction}\n"
+                        f"TargetFile: {file_path or 'unspecified'}\n"
+                        f"DiffContext:\n{diff_context}\n\n"
+                        f"ProjectContext:\n{enhanced.get('context','')}\n"
+                        f"HeadSnippet:\n{(head_snippet or {}).get('content','')}\n"
+                    )
+                    raw = await langchain_rag_service.llm.arun(prompt=prompt)
+                    from models.enhanced_models import CodeEditsResponse, CodeEdit
+                    # JSON 파싱 및 스키마 검증
+                    try:
+                        payload = _json.loads(raw)
+                    except Exception:
+                        cleaned = raw.strip().strip('`')
+                        payload = _json.loads(cleaned)
+                    edits_raw = payload.get('edits', [])
+                    explanations = payload.get('explanations', [])
+                    edits: List[CodeEdit] = []
+                    for e in edits_raw:
+                        try:
+                            edit = CodeEdit(**e).normalize()
+                            edits.append(edit)
+                        except Exception:
+                            continue
+                    validated = CodeEditsResponse(edits=edits, explanations=explanations)
+                    # optional dry-run diff
+                    dry_run = bool(data.get('dry_run', False))
+                    diff_preview = None
+                    if dry_run and file_path and validated.edits:
+                        try:
+                            # read original file
+                            async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as fsrc:
+                                original = await fsrc.readlines()
+                            # apply first edit preview only (for simplicity)
+                            e0 = validated.edits[0]
+                            start = max(1, e0.start_line) - 1
+                            end = max(start, e0.end_line)  # inclusive
+                            new_text_lines = (e0.new_text or '').splitlines(keepends=True)
+                            preview = original[:start] + new_text_lines + original[end:]
+                            diff = difflib.unified_diff(original, preview, fromfile='before', tofile='after')
+                            diff_preview = ''.join(diff)[:10000]
+                        except Exception:
+                            diff_preview = None
+                    return JSONResponse({
+                        "success": True,
+                        "edits": [e.dict() for e in validated.edits],
+                        "explanations": validated.explanations,
+                        "diff_preview": diff_preview
+                    })
+            except Exception as e:
+                logger.warning(f"generate-edit LLM JSON parsing failed: {e}")
+
+            # 폴백: 템플릿 기반 최소 에디트
+            default_edit = {
+                "file_path": file_path or "<select a file>",
+                "start_line": 1,
+                "end_line": 1,
+                "new_text": "# TODO: apply minimal change for instruction: " + instruction
+            }
+            return JSONResponse({
+                "success": True,
+                "edits": [default_edit],
+                "explanations": [
+                    "LLM unavailable or failed to produce strict JSON. Returning a minimal edit template."
+                ]
+            })
+
+    except Exception as e:
+        logger.error(f"RAG 기반 코드 에디트 생성 중 오류: {str(e)}")
+        return JSONResponse({"error": str(e), "success": False}, status_code=500)
+
+
+# 간단한 API Key 인증 검사 (옵션)
+def _check_api_key(request: Request) -> bool:
+    if not getattr(settings, 'require_api_key', False):
+        return True
+    provided = request.headers.get('x-api-key') or request.query_params.get('api_key')
+    expected = getattr(settings, 'api_key', None)
+    return bool(expected) and provided == expected
+
+def _check_jwt(request: Request) -> bool:
+    if not getattr(settings, 'jwt_enabled', False):
+        return True
+    if _jwt is None:
+        return False
+    auth = request.headers.get('authorization') or ''
+    if not auth.lower().startswith('bearer '):
+        return False
+    token = auth.split(' ', 1)[1].strip()
+    try:
+        _jwt.decode(token, getattr(settings, 'jwt_secret', ''), algorithms=[getattr(settings, 'jwt_algorithms', 'HS256')])
+        return True
+    except Exception:
+        return False
+
+def _audit(event: str, meta: Dict[str, Any]):
+    if not getattr(settings, 'audit_log_enabled', False):
+        return
+    try:
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "event": event,
+            "meta": meta,
+        }
+        # 파일에 JSONL로 비동기 기록
+        async def _write():
+            try:
+                # 프로젝트별 파일에도 기록
+                proj_path = _project_audit_path(str(meta.get('project_id', 'default')))
+                await _rotate_if_needed(audit_log_path)
+                await _rotate_if_needed(proj_path)
+                async with aiofiles.open(audit_log_path, mode='a', encoding='utf-8') as f:
+                    await f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                async with aiofiles.open(proj_path, mode='a', encoding='utf-8') as f2:
+                    await f2.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except Exception as e:
+                logger.warning(f"감사 로그 기록 실패: {e}")
+        # 백그라운드 태스크로 실행
+        asyncio.create_task(_write())
+    except Exception:
+        pass
+
 class SSEEventType:
     """SSE 이벤트 타입"""
     ENHANCEMENT_START = "enhancement_start"
@@ -154,6 +399,65 @@ class SSEEventType:
     CONTEXT_SEARCH = "context_search"
     ERROR = "error"
     HEARTBEAT = "heartbeat"
+
+# ---------------------------------------------------------------------------
+# Utility: File snippet reading
+# ---------------------------------------------------------------------------
+async def _read_file_snippet(file_path: str, start_line: int, end_line: int, max_lines: int = 500) -> Dict[str, Any]:
+    if start_line < 1:
+        start_line = 1
+    if end_line < start_line:
+        end_line = start_line
+    if end_line - start_line + 1 > max_lines:
+        end_line = start_line + max_lines - 1
+    try:
+        result_lines: List[str] = []
+        current = 1
+        async with aiofiles.open(file_path, mode='r', encoding='utf-8', errors='ignore') as f:
+            async for line in f:
+                if current > end_line:
+                    break
+                if start_line <= current <= end_line:
+                    result_lines.append(line)
+                current += 1
+        return {
+            "file_path": file_path,
+            "start_line": start_line,
+            "end_line": end_line,
+            "content": ''.join(result_lines)
+        }
+    except Exception as e:
+        return {
+            "error": str(e)
+        }
+
+async def _read_head_snippet(file_path: str, max_lines: int = 300) -> Dict[str, Any]:
+    """파일의 앞부분 일부를 반환 (컨텍스트가 없을 때 자동 프롬프트용)"""
+    return await _read_file_snippet(file_path, 1, max_lines, max_lines=max_lines)
+
+def _guess_language(file_path: str) -> str:
+    ext = os.path.splitext(file_path)[1].lower()
+    return {
+        ".py": "python",
+        ".js": "javascript",
+        ".ts": "typescript",
+        ".tsx": "tsx",
+        ".jsx": "jsx",
+        ".java": "java",
+        ".go": "go",
+        ".rb": "ruby",
+        ".rs": "rust",
+        ".cpp": "cpp",
+        ".cc": "cpp",
+        ".c": "c",
+        ".cs": "csharp",
+        ".swift": "swift",
+        ".kt": "kotlin",
+        ".json": "json",
+        ".md": "markdown",
+        ".yml": "yaml",
+        ".yaml": "yaml",
+    }.get(ext, "plaintext")
 
 @handle_errors(
     category=ErrorCategory.SYSTEM,
@@ -230,6 +534,20 @@ async def initialize_services():
         logger.info("자동 인덱싱 서비스가 성공적으로 시작되었습니다")
     except Exception as e:
         logger.error(f"자동 인덱싱 서비스 시작 중 오류: {e}")
+
+    # 선택적: 서버 시작 시 인덱스 워밍업
+    try:
+        if getattr(settings, 'warmup_on_start', False):
+            raw_ids = getattr(settings, 'warmup_project_ids', None) or ''
+            project_ids = [pid.strip() for pid in raw_ids.split(',') if pid.strip()]
+            if project_ids:
+                logger.info(f"인덱스 워밍업 시작: {project_ids}")
+                await asyncio.gather(*[
+                    vector_service.warmup_project_indices(pid) for pid in project_ids
+                ])
+                logger.info("인덱스 워밍업 완료")
+    except Exception as e:
+        logger.warning(f"워밍업 중 오류: {e}")
     
     # 초기화 완료 표시
     _services_initialized = True
@@ -1812,6 +2130,8 @@ async def validate_system(request):
     """서버/인덱싱/LLM/에러/성능 상태를 통합 검증합니다."""
     await ensure_services_initialized()
 
+    if not _check_api_key(request) or not _check_jwt(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     if not _check_rate_limit(request):
         return JSONResponse({"error": "Too Many Requests", "success": False}, status_code=429)
 
@@ -1819,10 +2139,13 @@ async def validate_system(request):
     params = request.query_params
     project_id = params.get("project_id", "default")
 
-    server = await get_server_status()
-    indexing = await vector_service.get_search_statistics(project_id)
-    errors = error_handler.get_error_stats()
-    performance = error_handler.get_performance_stats()
+    if REQUEST_COUNT:
+        REQUEST_COUNT.labels('/api/v1/validate').inc()
+    with _RequestTimer('/api/v1/validate'):
+        server = await get_server_status()
+        indexing = await vector_service.get_search_statistics(project_id)
+        errors = error_handler.get_error_stats()
+        performance = error_handler.get_performance_stats()
     llm_available = getattr(langchain_rag_service, "llm", None) is not None
 
     return JSONResponse({
@@ -1833,6 +2156,220 @@ async def validate_system(request):
         "errors": errors,
         "performance": performance
     })
+
+@mcp.custom_route(path="/metrics", methods=["GET"])
+async def metrics_endpoint(request):
+    """Prometheus metrics (if library is installed)"""
+    if not _PROM_AVAILABLE:
+        return JSONResponse({"error": "Prometheus not available"}, status_code=501)
+    if REQUEST_COUNT:
+        REQUEST_COUNT.labels('/metrics').inc()
+    with _RequestTimer('/metrics'):
+        data = generate_latest()
+    return Response(content=data, media_type=CONTENT_TYPE_LATEST)
+
+
+# 인덱스 워밍업 API
+@mcp.custom_route(path="/api/v1/index/warmup/{project_id}", methods=["POST"])
+@handle_errors(
+    category=ErrorCategory.SYSTEM,
+    level=ErrorLevel.LOW,
+    return_on_error={"error": "워밍업 실패", "success": False}
+)
+@measure_performance(operation_name="warmup_indices", threshold=10.0)
+async def warmup_indices(request):
+    await ensure_services_initialized()
+    if not _check_rate_limit(request):
+        return JSONResponse({"error": "Too Many Requests"}, status_code=429)
+    project_id = request.path_params.get("project_id", "default")
+    result = await vector_service.warmup_project_indices(project_id)
+    return JSONResponse(result)
+
+
+# 간단 HTML 대시보드
+@mcp.custom_route(path="/dashboard", methods=["GET"])
+@handle_errors(
+    category=ErrorCategory.SYSTEM,
+    level=ErrorLevel.LOW,
+    return_on_error=Response(content="<h1>Error</h1>")
+)
+@measure_performance(operation_name="dashboard", threshold=1.0)
+async def dashboard(request):
+    await ensure_services_initialized()
+    server = await get_server_status()
+    errors = error_handler.get_error_stats()
+    perf = error_handler.get_performance_stats()
+    # 최근 감사 로그 10개 로드
+    recent = await _read_recent_audit_items(limit=10)
+    rows = "".join(
+        f"<tr><td>{i+1}</td><td><code>{item.get('event','')}</code></td><td>{item.get('timestamp','')}</td><td><code>{(item.get('meta') or {}).get('project_id','')}</code></td></tr>"
+        for i, item in enumerate(recent)
+    )
+    html = f"""
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'/>
+  <title>MCP Server Dashboard</title>
+  <style>
+    body {{ font-family: -apple-system, Arial, sans-serif; margin: 24px; }}
+    .card {{ border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }}
+    .row {{ display: flex; gap: 16px; flex-wrap: wrap; }}
+    .col {{ flex: 1 1 280px; }}
+    h1 {{ margin-top: 0; }}
+    code {{ background:#f3f4f6; padding:2px 4px; border-radius:4px; }}
+  </style>
+  <meta http-equiv="refresh" content="5"/>
+  </head>
+<body>
+  <h1>MCP Server Dashboard</h1>
+  <div class="row">
+    <div class="card col">
+      <h3>Server</h3>
+      <div>Name: <code>{server.get('server_name')}</code></div>
+      <div>Status: <b>{server.get('status')}</b></div>
+      <div>Version: {server.get('version')}</div>
+    </div>
+    <div class="card col">
+      <h3>Performance</h3>
+      <div>Avg Response Time: {perf.get('avg_response_time'):.3f}s</div>
+      <div>Total Ops: {perf.get('total_operations')}</div>
+      <div>Slow Ops: {len(perf.get('slow_operations', []))}</div>
+    </div>
+    <div class="card col">
+      <h3>Errors</h3>
+      <div>Total: {errors.get('total_errors')}</div>
+      <div>Recent: {len(errors.get('recent_errors', []))}</div>
+    </div>
+  </div>
+  <div class="card">
+    <h3>Links</h3>
+    <ul>
+      <li><a href="/api/v1/validate">/api/v1/validate</a></li>
+      <li><a href="/metrics">/metrics</a> (if available)</li>
+      <li><a href="/api/v1/audit/recent">/api/v1/audit/recent</a></li>
+    </ul>
+  </div>
+  <div class="card">
+    <h3>Recent Audit</h3>
+    <table border="1" cellpadding="6" cellspacing="0">
+      <thead>
+        <tr><th>#</th><th>Event</th><th>Timestamp</th><th>Project</th></tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+</body>
+</html>
+"""
+    return Response(content=html, media_type="text/html")
+
+
+# 감사 로그 조회 API (최근 N개)
+@mcp.custom_route(path="/api/v1/audit/recent", methods=["GET"])
+@handle_errors(
+    category=ErrorCategory.SYSTEM,
+    level=ErrorLevel.LOW,
+    return_on_error={"error": "감사 로그 조회 실패", "success": False}
+)
+@measure_performance(operation_name="get_recent_audit", threshold=2.0)
+async def get_recent_audit(request):
+    limit = int(request.query_params.get("limit", 100))
+    project_id = request.query_params.get("project_id")
+    # 프로젝트 지정 시 해당 파일 우선
+    target_path = _project_audit_path(project_id) if project_id else audit_log_path
+    # 파일이 없으면 비어있는 결과 반환
+    if not os.path.exists(target_path):
+        return JSONResponse({"success": True, "items": []})
+    items = []
+    try:
+        # 최근 N라인만 읽는 간단한 방법 (큰 파일 고려 시 tail 방식 대체 가능)
+        async with aiofiles.open(target_path, mode='r', encoding='utf-8') as f:
+            async for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except Exception:
+                    continue
+        items = items[-limit:]
+        return JSONResponse({"success": True, "items": items})
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@mcp.custom_route(path="/api/v1/audit/search", methods=["GET"])
+@handle_errors(
+    category=ErrorCategory.SYSTEM,
+    level=ErrorLevel.LOW,
+    return_on_error={"error": "감사 로그 검색 실패", "success": False}
+)
+@measure_performance(operation_name="search_audit", threshold=3.0)
+async def search_audit(request):
+    """감사 로그 검색(프로젝트/이벤트/시작시간 기준 필터)"""
+    project_id = request.query_params.get("project_id")
+    event_filter = request.query_params.get("event")
+    since = request.query_params.get("since")  # ISO8601
+    limit = int(request.query_params.get("limit", 200))
+
+    target_path = _project_audit_path(project_id) if project_id else audit_log_path
+    if not os.path.exists(target_path):
+        return JSONResponse({"success": True, "items": []})
+
+    since_dt = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except Exception:
+            since_dt = None
+
+    items = []
+    try:
+        async with aiofiles.open(target_path, mode='r', encoding='utf-8') as f:
+            async for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                if event_filter and event_filter not in str(obj.get('event', '')):
+                    continue
+                if since_dt:
+                    try:
+                        ts = datetime.fromisoformat(str(obj.get('timestamp', '')).replace("Z", "+00:00"))
+                        if ts < since_dt:
+                            continue
+                    except Exception:
+                        pass
+                items.append(obj)
+        # 최신순으로 제한
+        items = items[-limit:]
+        return JSONResponse({"success": True, "items": items})
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+async def _read_recent_audit_items(project_id: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+    target_path = _project_audit_path(project_id) if project_id else audit_log_path
+    if not os.path.exists(target_path):
+        return []
+    items: List[Dict[str, Any]] = []
+    try:
+        async with aiofiles.open(target_path, mode='r', encoding='utf-8') as f:
+            async for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    items.append(json.loads(line))
+                except Exception:
+                    continue
+        return items[-limit:]
+    except Exception:
+        return []
 
 
 # 🔄 피드백 관련 FastAPI 엔드포인트들
@@ -1923,6 +2460,8 @@ async def rag_enhance_prompt(request):
     """RAG 기반 프롬프트 개선 엔드포인트"""
     try:
         await ensure_services_initialized()
+        if not _check_api_key(request) or not _check_jwt(request):
+            return JSONResponse({"error": "Unauthorized", "success": False}, status_code=401)
         if not _check_rate_limit(request):
             return JSONResponse({"error": "Too Many Requests", "success": False}, status_code=429)
         
@@ -1936,14 +2475,21 @@ async def rag_enhance_prompt(request):
         if not user_prompt.strip():
             return JSONResponse({"error": "프롬프트가 비어있습니다", "success": False})
         
+        # 프로젝트 쿼터 체크 및 감사
+        if not _check_project_quota(project_id):
+            return JSONResponse({"error": "Project quota exceeded", "success": False}, status_code=429)
+        _audit('rag_enhance_prompt', {"project_id": project_id})
+
         # RAG 기반 프롬프트 향상
-        result = await langchain_rag_service.generate_enhanced_prompt(
-            user_prompt=user_prompt,
-            project_id=project_id,
-            context_limit=context_limit
-        )
-        
-        return JSONResponse(result)
+        if REQUEST_COUNT:
+            REQUEST_COUNT.labels('/api/v1/rag/enhance-prompt').inc()
+        with _RequestTimer('/api/v1/rag/enhance-prompt'):
+            result = await langchain_rag_service.generate_enhanced_prompt(
+                user_prompt=user_prompt,
+                project_id=project_id,
+                context_limit=context_limit
+            )
+            return JSONResponse(result)
         
     except Exception as e:
         logger.error(f"RAG 기반 프롬프트 개선 중 오류: {str(e)}")
@@ -1960,6 +2506,8 @@ async def rag_generate_code(request):
     """RAG 기반 코드 생성 엔드포인트"""
     try:
         await ensure_services_initialized()
+        if not _check_api_key(request) or not _check_jwt(request):
+            return JSONResponse({"error": "Unauthorized", "success": False}, status_code=401)
         if not _check_rate_limit(request):
             return {"error": "Too Many Requests", "success": False, "status_code": 429}
         
@@ -1973,18 +2521,55 @@ async def rag_generate_code(request):
         if not user_prompt.strip():
             return {"error": "프롬프트가 비어있습니다", "success": False}
         
+        # 스트리밍 여부
+        stream = bool(data.get("stream", False))
+
+        # 프로젝트 쿼터 체크 및 감사
+        if not _check_project_quota(project_id):
+            return JSONResponse({"error": "Project quota exceeded", "success": False}, status_code=429)
+        _audit('rag_generate_code', {"project_id": project_id, "stream": stream})
+
         # RAG 기반 코드 생성
-        result = await langchain_rag_service.generate_code_with_rag(
-            user_prompt=user_prompt,
-            project_id=project_id,
-            context_limit=context_limit
-        )
+        if not stream:
+            if REQUEST_COUNT:
+                REQUEST_COUNT.labels('/api/v1/rag/generate-code').inc()
+            with _RequestTimer('/api/v1/rag/generate-code'):
+                result = await langchain_rag_service.generate_code_with_rag(
+                    user_prompt=user_prompt,
+                    project_id=project_id,
+                    context_limit=context_limit
+                )
+                return JSONResponse(result)
         
-        return result
+        async def event_generator():
+            # 컨텍스트 준비
+            enhanced = await langchain_rag_service.generate_enhanced_prompt(
+                user_prompt=user_prompt,
+                project_id=project_id,
+                context_limit=context_limit
+            )
+            yield await create_sse_event(SSEEventType.ENHANCEMENT_COMPLETE, {"enhanced": True})
+            # LLM 스트리밍 (가능 시)
+            if getattr(langchain_rag_service, 'llm', None) and hasattr(langchain_rag_service.llm, 'astream'):
+                async for chunk in langchain_rag_service.llm.astream({
+                    'context': enhanced.get('context', ''),
+                    'question': user_prompt
+                }):
+                    yield await create_sse_event(SSEEventType.ENHANCEMENT_PROGRESS, {"delta": chunk})
+            else:
+                # 폴백: 전체 응답 한 번에
+                result = await langchain_rag_service.generate_code_with_rag(
+                    user_prompt=user_prompt,
+                    project_id=project_id,
+                    context_limit=context_limit
+                )
+                yield await create_sse_event(SSEEventType.ENHANCEMENT_COMPLETE, result)
+
+        return EventSourceResponse(event_generator())
         
     except Exception as e:
         logger.error(f"RAG 기반 코드 생성 중 오류: {str(e)}")
-        return {"error": str(e), "success": False}
+        return JSONResponse({"error": str(e), "success": False}, status_code=500)
 
 @mcp.custom_route(path="/api/v1/rag/search-summarize", methods=["POST"])
 @handle_errors(
@@ -1997,8 +2582,10 @@ async def rag_search_summarize(request):
     """RAG 기반 검색 및 요약 엔드포인트"""
     try:
         await ensure_services_initialized()
+        if not _check_api_key(request):
+            return JSONResponse({"error": "Unauthorized", "success": False}, status_code=401)
         if not _check_rate_limit(request):
-            return {"error": "Too Many Requests", "success": False, "status_code": 429}
+            return JSONResponse({"error": "Too Many Requests", "success": False}, status_code=429)
         
         # 요청 데이터 파싱
         data = await request.json()
@@ -2008,20 +2595,53 @@ async def rag_search_summarize(request):
         
         # 입력 검증
         if not query.strip():
-            return {"error": "검색 쿼리가 비어있습니다", "success": False}
+            return JSONResponse({"error": "검색 쿼리가 비어있습니다", "success": False}, status_code=400)
         
+        # 프로젝트 쿼터 체크 및 감사
+        if not _check_project_quota(project_id):
+            return JSONResponse({"error": "Project quota exceeded", "success": False}, status_code=429)
+        _audit('rag_search_summarize', {"project_id": project_id})
+
         # RAG 기반 검색 및 요약
-        result = await langchain_rag_service.search_and_summarize(
-            query=query,
-            project_id=project_id,
-            limit=limit
-        )
-        
-        return result
+        if REQUEST_COUNT:
+            REQUEST_COUNT.labels('/api/v1/rag/search-summarize').inc()
+        with _RequestTimer('/api/v1/rag/search-summarize'):
+            result = await langchain_rag_service.search_and_summarize(
+                query=query,
+                project_id=project_id,
+                limit=limit
+            )
+            return JSONResponse(result)
         
     except Exception as e:
         logger.error(f"RAG 기반 검색 및 요약 중 오류: {str(e)}")
-        return {"error": str(e), "success": False}
+        return JSONResponse({"error": str(e), "success": False}, status_code=500)
+
+@mcp.custom_route(path="/api/v1/resource/snippet", methods=["GET"])
+@handle_errors(
+    category=ErrorCategory.SYSTEM,
+    level=ErrorLevel.LOW,
+    return_on_error={"error": "스니펫 조회 실패", "success": False}
+)
+@measure_performance(operation_name="get_snippet", threshold=1.0)
+async def get_snippet(request):
+    """코드/문서 스니펫 반환 (파일 경로 + 라인 범위)"""
+    await ensure_services_initialized()
+    if not _check_api_key(request):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    if not _check_rate_limit(request):
+        return JSONResponse({"error": "Too Many Requests"}, status_code=429)
+
+    params = request.query_params
+    file_path = params.get("file_path")
+    start_line = int(params.get("start_line", 1))
+    end_line = int(params.get("end_line", start_line + 200))
+    if not file_path:
+        return JSONResponse({"error": "file_path is required"}, status_code=400)
+
+    snippet = await _read_file_snippet(file_path, start_line, end_line)
+    language = _guess_language(file_path)
+    return JSONResponse({"success": True, "language": language, **snippet})
 
 # 🎯 파일 와처 기반 엔드포인트들
 
@@ -2036,6 +2656,8 @@ async def start_file_watcher(request):
     """파일 감시 시작 엔드포인트"""
     try:
         await ensure_services_initialized()
+        if not _check_api_key(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
         
         # 요청 데이터 파싱
         data = await request.json()
@@ -2073,6 +2695,8 @@ async def stop_file_watcher(request):
     """파일 감시 중지 엔드포인트"""
     try:
         await ensure_services_initialized()
+        if not _check_api_key(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
         
         # 요청 데이터 파싱
         data = await request.json()

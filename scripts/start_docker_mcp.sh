@@ -2,6 +2,37 @@
 
 echo "=== FastMCP Docker 서버 시작 ==="
 
+# 사용법 및 서비스 선택/정리 플래그 파싱
+SERVICES_INPUT=""
+CLEAN_MODE=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --only|-o)
+      SERVICES_INPUT="$2"; shift 2;;
+    --clean)
+      CLEAN_MODE=1; shift;;
+    --no-clean)
+      CLEAN_MODE=0; shift;;
+    -h|--help)
+      echo "사용법: $0 [--only fastmcp-server,chromadb,prometheus,grafana,deepseek-r1] [--clean|--no-clean]"
+      echo "  예: $0 --only fastmcp-server,chromadb --clean"
+      exit 0;;
+    *)
+      # 공백 구분으로도 서비스 나열 허용
+      SERVICES_INPUT="${SERVICES_INPUT:+$SERVICES_INPUT }$1"; shift;;
+  esac
+done
+
+# 서비스 인자 구성 (콤마/공백 구분 지원)
+SERVICES_ARGS=()
+if [[ -n "$SERVICES_INPUT" ]]; then
+  IFS=', ' read -r -a _svc_arr <<< "$SERVICES_INPUT"
+  for s in "${_svc_arr[@]}"; do
+    [[ -n "$s" ]] && SERVICES_ARGS+=("$s")
+  done
+fi
+
+
 # 색상 정의
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -54,8 +85,8 @@ else
     fi
 fi
 
-# 기존 컨테이너 정리
-echo -e "${BLUE}🧹 기존 컨테이너 정리 중...${NC}"
+# 선택적 정리 단계 (기본 비활성화)
+echo -e "${BLUE}🧹 컨테이너 정리 옵션: ${NC}$([[ $CLEAN_MODE -eq 1 ]] && echo '활성화' || echo '비활성화')"
 
 # Docker 데몬 상태 확인
 if ! docker info &>/dev/null; then
@@ -64,29 +95,22 @@ if ! docker info &>/dev/null; then
     exit 1
 fi
 
-# 기존 컨테이너 확인 및 정리
-echo -e "${YELLOW}📋 기존 컨테이너 확인 중...${NC}"
-EXISTING_CONTAINERS=$(docker ps -a --filter "name=fastmcp-prompt-enhancement" --filter "name=chromadb-server" --filter "name=deepseek-r1-server" --format "table {{.Names}}\t{{.Status}}" 2>/dev/null || true)
-
-if [ -n "$EXISTING_CONTAINERS" ]; then
-    echo "기존 컨테이너 발견:"
-    echo "$EXISTING_CONTAINERS"
-    echo ""
-    
-    # 강제 종료 및 제거
-    echo -e "${YELLOW}🛑 컨테이너 강제 종료 중...${NC}"
-    docker stop fastmcp-prompt-enhancement chromadb-server deepseek-r1-server 2>/dev/null || true
-    
-    echo -e "${YELLOW}🗑️  컨테이너 제거 중...${NC}"
-    docker rm fastmcp-prompt-enhancement chromadb-server deepseek-r1-server 2>/dev/null || true
-    
-    # Docker Compose 정리 (타임아웃 설정)
-    echo -e "${YELLOW}🔧 Docker Compose 정리 중...${NC}"
-    timeout 30 docker-compose down 2>/dev/null || timeout 30 docker compose down 2>/dev/null || true
-    
-    echo -e "${GREEN}✅ 컨테이너 정리 완료${NC}"
-else
-    echo -e "${GREEN}✅ 기존 컨테이너 없음${NC}"
+if [[ $CLEAN_MODE -eq 1 ]]; then
+  echo -e "${YELLOW}📋 선택한 서비스 정리 중...${NC}"
+  # 정리 대상 서비스 목록 (미선택 시 프로젝트의 표준 서비스)
+  DEFAULT_SERVICES=(fastmcp-server chromadb deepseek-r1 prometheus grafana)
+  TARGET_SERVICES=("${SERVICES_ARGS[@]}")
+  if [[ ${#TARGET_SERVICES[@]} -eq 0 ]]; then
+    TARGET_SERVICES=("${DEFAULT_SERVICES[@]}")
+  fi
+  if command -v docker-compose &> /dev/null; then
+    docker-compose stop "${TARGET_SERVICES[@]}" 2>/dev/null || true
+    docker-compose rm -f "${TARGET_SERVICES[@]}" 2>/dev/null || true
+  else
+    docker compose stop "${TARGET_SERVICES[@]}" 2>/dev/null || true
+    docker compose rm -f "${TARGET_SERVICES[@]}" 2>/dev/null || true
+  fi
+  echo -e "${GREEN}✅ 선택 서비스 정리 완료${NC}"
 fi
 
 # 📁 필요한 디렉토리들 생성
@@ -103,9 +127,17 @@ echo "   - ./backups/chroma (백업 파일)"
 # Docker 이미지 빌드 및 컨테이너 시작
 echo -e "${BLUE}🔨 Docker 이미지 빌드 중...${NC}"
 if command -v docker-compose &> /dev/null; then
-    docker-compose build
+    if [[ ${#SERVICES_ARGS[@]} -gt 0 ]]; then
+      docker-compose build "${SERVICES_ARGS[@]}"
+    else
+      docker-compose build
+    fi
 else
-    docker compose build
+    if [[ ${#SERVICES_ARGS[@]} -gt 0 ]]; then
+      docker compose build "${SERVICES_ARGS[@]}"
+    else
+      docker compose build
+    fi
 fi
 
 if [ $? -ne 0 ]; then
@@ -115,9 +147,17 @@ fi
 
 echo -e "${BLUE}🚀 FastMCP 서버 시작 중...${NC}"
 if command -v docker-compose &> /dev/null; then
-    docker-compose up -d
+    if [[ ${#SERVICES_ARGS[@]} -gt 0 ]]; then
+      docker-compose up -d "${SERVICES_ARGS[@]}"
+    else
+      docker-compose up -d
+    fi
 else
-    docker compose up -d
+    if [[ ${#SERVICES_ARGS[@]} -gt 0 ]]; then
+      docker compose up -d "${SERVICES_ARGS[@]}"
+    else
+      docker compose up -d
+    fi
 fi
 
 if [ $? -ne 0 ]; then
