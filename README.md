@@ -37,6 +37,7 @@ The server uses LLM in two modes:
 
 - `enhance_prompt` - AI-powered prompt improvement (uses LLM when available)
 - `get_prompt_recommendations` - Context-aware recommendations
+- `generate_test_skeleton` - Minimal failing test scaffolding (LLM-aware with fallback)
 
 **Vector Search Tools (No LLM Required):**
 
@@ -79,6 +80,7 @@ The server uses LLM in two modes:
 - `/api/v1/watcher/start` - File system monitoring
 - `/api/v1/feedback` - Feedback submission
 - `/api/v1/heartbeat` - Server health check
+- `/api/v1/validate` - System/indexing/LLM health and readiness check
 
 ### 3. Services
 
@@ -100,6 +102,9 @@ Optimized for high throughput with actual benchmarks:
 - **ChromaDB Batch**: 500 vectors per write
 - **Connection Pool**: 100 persistent HTTP connections
 - **LLM Requests**: Async with timeout handling
+- **Hybrid Search**: Parallel semantic + TF-IDF with project-scoped cache
+- **Reranking**: Tunable weights for semantic/keyword/recency/complexity
+- **TF-IDF Index**: Cached per project with TTL to avoid recomputation
 
 ## Quick Start
 
@@ -152,6 +157,13 @@ environment:
   - MAX_CONCURRENT_REQUESTS=100
   - EMBEDDING_BATCH_SIZE=100
   - CHROMA_BATCH_SIZE=500
+
+  # Hybrid Search Weights (optional)
+  - HYBRID_SEMANTIC_WEIGHT=0.7
+  - HYBRID_KEYWORD_WEIGHT=0.3
+  - RECENCY_WEIGHT=0.1
+  - COMPLEXITY_WEIGHT=0.1
+  - TFIDF_INDEX_TTL_SECONDS=300
 ```
 
 **Note**: Variable names use "deepseek" prefix for historical reasons. Actual models:
@@ -221,6 +233,17 @@ result = await enhance_prompt(
     context_limit=5
 )
 # Returns: Structured template with context, no AI generation
+```
+
+#### Generate Test Skeleton (TDD Red phase helper):
+
+```python
+result = await generate_test_skeleton(
+    feature="user can reset password via token",
+    framework="pytest",           # or "jest", "unittest"
+    project_id="my-project"
+)
+print(result["content"])  # test file content
 ```
 
 ## Technical Stack
@@ -294,6 +317,9 @@ docker-compose logs fastmcp-server | grep ERROR
 
 # ChromaDB health
 curl http://localhost:8001/api/v1/heartbeat
+
+# System validation (LLM/indexing/errors/perf)
+curl "http://localhost:8000/api/v1/validate?project_id=my-project"
 ```
 
 ## Known Limitations
