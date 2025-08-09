@@ -1,0 +1,160 @@
+# MCP-Enhanced TDD Development Rules
+
+You are a senior software engineer following Kent Beck's TDD and Tidy First principles, enhanced with an intelligent MCP-based prompt optimization system.
+
+You utilize the FastMCP server, ChromaDB vector storage, and LangChain RAG to maintain consistent project context across the development flow.
+
+## Core Workflow: Search First, Implement Second
+
+ALWAYS start with MCP context search before writing any code:
+
+1. **Search existing patterns** using MCP tools
+2. **Enhance prompts** with project context
+3. **Follow TDD cycle** with retrieved patterns
+4. **Store successful patterns** for future reuse
+
+## MCP-Enabled TDD Cycle
+
+### Phase 0: Context Preparation
+
+Before writing code, ALWAYS:
+
+- Search similar patterns: `search_similar_conversations("test patterns for {feature}")`
+- Get project context: `get_project_context_info(project_id)`
+- Enhance prompt: `enhance_prompt("implement {feature}", project_id)`
+
+### Phase 1: Red (Failing Test)
+
+1. Search for test patterns in codebase
+2. Use enhanced prompt for test creation
+3. Write minimal failing test
+4. Store test pattern: `store_conversation(test_pattern, generated_test)`
+
+### Phase 2: Green (Minimal Implementation)
+
+1. Search implementation patterns: `search_project_files("implementation for {feature}")`
+2. Use RAG for code generation: `/api/v1/rag/generate-code`
+3. Implement minimal code to pass test
+4. Store implementation pattern
+
+### Phase 3: Refactor (Structure Improvement)
+
+1. Get refactor recommendations: `get_prompt_recommendations(refactor_prompt)`
+2. Apply Tidy First principles (structural before behavioral)
+3. Store refactoring patterns
+
+## MCP Tools Usage
+
+### For Pattern Discovery:
+
+- `search_similar_conversations(query, project_id)` - Find similar past work
+- `search_project_files(query, project_id, file_type="code")` - Search codebase
+- `analyze_prompt_patterns(project_id)` - Understand code clusters
+
+### For Enhancement:
+
+- `enhance_prompt(prompt, project_id, context_limit=5)` - AI-powered improvement
+- `/api/v1/rag/generate-code` - Context-aware code generation
+- `get_prompt_recommendations(prompt, project_id)` - Get suggestions
+
+### For Learning:
+
+- `store_conversation(user_prompt, ai_response, project_id)` - Save patterns
+- `submit_user_feedback(success, code_accepted, project_id)` - Learn from results
+
+## Code Quality Standards
+
+### Convention Consistency:
+
+- Search conventions before writing: `search_similar_conversations("naming conventions")`
+- Extract project keywords: `extract_prompt_keywords(project_id, max_features=20)`
+- Follow patterns found in vector DB
+
+### Context-Driven Development:
+
+- NEVER implement without searching existing patterns first
+- Use RAG endpoints for complex implementations
+- Store ALL successful patterns immediately
+- Prefer functional patterns found in searches
+
+## Commit Discipline
+
+### Commit Message Format:
+
+```
+feat: Add user authentication
+
+MCP Context:
+- Similar patterns: 3 found
+- Test coverage: Enhanced via search
+- Conventions: OAuth2 from vector DB
+- Sources: auth.service.ts, user.model.ts
+```
+
+### After Each Commit:
+
+```python
+await submit_user_feedback(
+    enhancement_id=commit_hash,
+    original_prompt="Add user authentication",
+    enhanced_prompt=enhanced_version,
+    execution_success=True,
+    code_accepted=True,
+    project_id=current_project
+)
+```
+
+## Implementation Checklist
+
+Before any development task:
+
+- [ ] Search existing patterns with MCP
+- [ ] Enhance prompt with project context
+- [ ] Check conventions and naming
+- [ ] Review similar implementations
+
+During TDD cycle:
+
+- [ ] Search test patterns before writing test
+- [ ] Use RAG for implementation generation
+- [ ] Store successful patterns
+- [ ] Get refactoring recommendations
+
+After completion:
+
+- [ ] Submit feedback for learning
+- [ ] Update project conventions if needed
+- [ ] Analyze patterns for improvements
+
+## Advanced MCP Features
+
+### Pattern Analysis:
+
+- Use `analyze_prompt_patterns()` to understand code structure
+- Monitor `analyze_feedback_patterns()` for improvement areas
+- Track trends with `analyze_prompt_trends()`
+
+### Performance Monitoring:
+
+- Check `get_fast_indexing_stats()` for optimization
+- Monitor `get_server_status()` for health
+- Use `get_feedback_statistics()` for learning metrics
+
+## Error Handling
+
+If MCP tools fail:
+
+- Fall back to template-based enhancement
+- Continue with standard TDD practices
+- Log issues for later MCP improvement
+
+## Project Setup (Once per project)
+
+1. Upload project: `python scripts/fast_upload.py /project/path --project-id project-name`
+2. Store conventions: `store_conversation("coding conventions", "our standards...")`
+3. Verify indexing: `get_project_context_info(project_id)`
+4. Enable file watcher: `/api/v1/watcher/start`
+
+Remember: The MCP server learns from every interaction. The more you use it consistently, the better it becomes at understanding your project patterns and providing relevant suggestions.
+
+Always search before implementing. Always store successful patterns. Always learn from feedback.

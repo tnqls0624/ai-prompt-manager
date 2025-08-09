@@ -7,6 +7,7 @@ from config import settings
 import asyncio
 import re
 from datetime import datetime, timedelta
+import time
 
 # 선택적 임포트
 try:
@@ -368,11 +369,12 @@ class VectorService:
         self.prompt_collection = None
         self.context_collection = None
         
-        # 하이브리드 검색을 위한 TF-IDF 벡터라이저
+        # 하이브리드 검색을 위한 TF-IDF 인덱스 및 벡터라이저
         self.tfidf_vectorizer = None
+        self._tfidf_index_cache = {}
         if SKLEARN_AVAILABLE:
             self.tfidf_vectorizer = TfidfVectorizer(
-                max_features=5000,
+                max_features=8000,
                 stop_words='english',
                 ngram_range=(1, 2)
             )
@@ -550,9 +552,10 @@ class VectorService:
                     logger.info("캐시된 검색 결과 사용")
                     return cached_result
             
-            # 하이브리드 검색 수행
-            semantic_results = await self._semantic_search(query, project_id, limit * 2)
-            keyword_results = await self._keyword_search(query, project_id, limit * 2)
+            # 하이브리드 검색 수행 (병렬)
+            semantic_task = asyncio.create_task(self._semantic_search(query, project_id, limit * 2))
+            keyword_task = asyncio.create_task(self._keyword_search(query, project_id, limit * 2))
+            semantic_results, keyword_results = await asyncio.gather(semantic_task, keyword_task)
             
             # 결과 병합 및 재랭킹
             combined_results = self._combine_and_rerank(
@@ -635,13 +638,23 @@ class VectorService:
             documents = all_results["documents"]
             metadatas = all_results["metadatas"]
             
-            # TF-IDF 벡터화
-            all_texts = [query] + documents
-            tfidf_matrix = self.tfidf_vectorizer.fit_transform(all_texts)
-            
-            # 코사인 유사도 계산
-            query_vector = tfidf_matrix[0]
-            doc_vectors = tfidf_matrix[1:]
+            # TF-IDF 벡터화 (프로젝트별 캐시)
+            index_entry = self._tfidf_index_cache.get(project_id)
+            now_ts = datetime.now().timestamp()
+            index_ttl = getattr(settings, 'tfidf_index_ttl_seconds', 300)
+            if not index_entry or now_ts - index_entry.get('built_at', 0) > index_ttl or len(index_entry.get('documents', [])) != len(documents):
+                tfidf_matrix_all = self.tfidf_vectorizer.fit_transform(documents)
+                self._tfidf_index_cache[project_id] = {
+                    'built_at': now_ts,
+                    'tfidf_matrix': tfidf_matrix_all,
+                    'documents': documents
+                }
+            else:
+                tfidf_matrix_all = index_entry['tfidf_matrix']
+
+            # 쿼리 벡터는 기존 vocabulary에 맞춰 transform
+            query_vector = self.tfidf_vectorizer.transform([query])
+            doc_vectors = tfidf_matrix_all
             
             similarities = cosine_similarity(query_vector, doc_vectors)[0]
             
@@ -676,7 +689,13 @@ class VectorService:
         # 결과 병합 (ID 기반으로 중복 제거)
         combined_results = {}
         
-        # 의미적 검색 결과 추가 (가중치 0.7)
+        # 가중치 설정
+        w_sem = getattr(settings, 'hybrid_semantic_weight', 0.7)
+        w_kw = getattr(settings, 'hybrid_keyword_weight', 0.3)
+        w_rec = getattr(settings, 'recency_weight', 0.1)
+        w_cplx = getattr(settings, 'complexity_weight', 0.1)
+
+        # 의미적 검색 결과 추가
         for result in semantic_results:
             result_id = result["metadata"].get("id")
             if result_id:
@@ -684,10 +703,10 @@ class VectorService:
                     **result,
                     "semantic_score": result["similarity"],
                     "keyword_score": 0.0,
-                    "combined_score": result["similarity"] * 0.7
+                    "combined_score": result["similarity"] * w_sem
                 }
         
-        # 키워드 검색 결과 추가 (가중치 0.3)
+        # 키워드 검색 결과 추가
         for result in keyword_results:
             result_id = result["metadata"].get("id")
             if result_id:
@@ -695,8 +714,8 @@ class VectorService:
                     # 기존 결과 업데이트
                     combined_results[result_id]["keyword_score"] = result["similarity"]
                     combined_results[result_id]["combined_score"] = (
-                        combined_results[result_id]["semantic_score"] * 0.7 +
-                        result["similarity"] * 0.3
+                        combined_results[result_id]["semantic_score"] * w_sem +
+                        result["similarity"] * w_kw
                     )
                 else:
                     # 새로운 결과 추가
@@ -704,7 +723,7 @@ class VectorService:
                         **result,
                         "semantic_score": 0.0,
                         "keyword_score": result["similarity"],
-                        "combined_score": result["similarity"] * 0.3
+                        "combined_score": result["similarity"] * w_kw
                     }
         
         # 추가 랭킹 요소 적용
@@ -716,10 +735,11 @@ class VectorService:
             complexity_score = result["metadata"].get("complexity_score", 0.5)
             
             # 최종 점수 계산
+            # 합은 1.0을 넘지 않도록 구성
             result["final_score"] = (
-                result["combined_score"] * 0.8 +
-                time_score * 0.1 +
-                complexity_score * 0.1
+                result["combined_score"] * (1.0 - (w_rec + w_cplx)) +
+                time_score * w_rec +
+                complexity_score * w_cplx
             )
         
         # 최종 점수로 정렬

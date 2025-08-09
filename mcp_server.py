@@ -21,6 +21,7 @@ import hashlib
 from datetime import datetime
 import aiohttp
 import math
+from collections import defaultdict, deque
 
 # 기존 서비스들 import
 from services.vector_service import VectorService
@@ -115,6 +116,35 @@ _services_initialized = False
 
 # SSE 연결 관리
 active_connections: Dict[str, asyncio.Queue] = {}
+
+# 간단한 레이트 리미터 (분당 요청 수 + 버스트 제한)
+_rate_limit_buckets: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+
+def _get_client_key(request: Request) -> str:
+    try:
+        # 프록시 고려
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        client_host = request.client.host if request and request.client else "unknown"
+        return client_host
+    except Exception:
+        return "unknown"
+
+def _check_rate_limit(request: Request) -> bool:
+    now = time.time()
+    key = _get_client_key(request)
+    bucket = _rate_limit_buckets[key]
+    # 60초 이전 항목 제거
+    while bucket and now - bucket[0] > 60.0:
+        bucket.popleft()
+    # 설정 값
+    max_per_min = getattr(settings, "rate_limit_per_minute", 600)
+    burst = getattr(settings, "rate_limit_burst_size", 100)
+    if len(bucket) >= max_per_min or (burst and len(bucket) >= burst):
+        return False
+    bucket.append(now)
+    return True
 
 class SSEEventType:
     """SSE 이벤트 타입"""
@@ -444,10 +474,11 @@ async def index_project_stream(request):
             "progress": (current / total) * 100 if total > 0 else 0
         })
     
-    # 통합 인덱싱 수행
-    result = await comprehensive_project_indexing(
+    # 통합 인덱싱 수행 (fast_indexing_service 사용)
+    result = await fast_indexing_service.index_project(
         project_path=project_path,
-        project_id=project_id
+        project_id=project_id,
+        progress_callback=progress_callback
     )
     
     # 인덱싱 완료 알림
@@ -1681,13 +1712,128 @@ async def get_prompt_recommendations(
             "project_id": project_id,
             "recommendations": recommendations
         }
-        
     except Exception as e:
         logger.error(f"프롬프트 추천 조회 오류: {e}")
         return {
             "status": "error",
             "message": f"프롬프트 추천 조회 중 오류가 발생했습니다: {str(e)}"
         }
+
+
+# 테스트 스캐폴딩 MCP 도구
+@mcp.tool()
+@handle_errors(
+    category=ErrorCategory.AI_SERVICE,
+    level=ErrorLevel.MEDIUM,
+    user_message="테스트 스캐폴딩 생성 중 오류가 발생했습니다."
+)
+@measure_performance(operation_name="generate_test_skeleton", threshold=3.0)
+async def generate_test_skeleton(
+    feature: str,
+    framework: str = "pytest",
+    project_id: str = "default"
+) -> Dict[str, Any]:
+    """
+    기능 설명과 테스트 프레임워크에 맞는 최소 실패 테스트 스켈레톤을 생성합니다.
+    LLM 사용 가능 시 컨텍스트를 반영해 생성하고, 없으면 템플릿 기반으로 반환합니다.
+    """
+    await ensure_services_initialized()
+
+    framework = (framework or "pytest").lower()
+
+    # 프레임워크별 기본 템플릿
+    templates = {
+        "pytest": f"""
+import pytest
+
+def test_{'_' .join(feature.strip().split())}_should_fail_initially():
+    # Arrange
+    # TODO: setup
+
+    # Act
+    # TODO: call function under test
+
+    # Assert
+    with pytest.raises(AssertionError):
+        assert False, "Write minimal failing assertion for: {feature}"
+""".strip(),
+        "jest": f"""
+describe('{feature}', () => {{
+  test('should fail initially', () => {{
+    // Arrange
+
+    // Act
+
+    // Assert
+    expect(false).toBe(true); // minimal failing expectation
+  }});
+}});
+""".strip(),
+        "unittest": f"""
+import unittest
+
+class Test{''.join([w.capitalize() for w in feature.split()])}(unittest.TestCase):
+    def test_should_fail_initially(self):
+        self.assertTrue(False, "Write minimal failing assertion for: {feature}")
+
+if __name__ == '__main__':
+    unittest.main()
+""".strip(),
+    }
+
+    # LLM 사용 시 컨텍스트 반영 생성 시도
+    try:
+        if getattr(langchain_rag_service, "llm", None):
+            context_info = await vector_service.get_project_context(project_id)
+            prompt = (
+                "Generate a minimal failing test skeleton for the following feature, "
+                f"using {framework}. Include only the test file content, no explanations.\n\n"
+                f"Feature: {feature}\n\nProject Context:\n{context_info or {}}\n"
+            )
+            generated = await langchain_rag_service.llm.arun(prompt=prompt)
+            return {"success": True, "framework": framework, "content": generated}
+    except Exception as e:
+        logger.warning(f"LLM 기반 테스트 스캐폴딩 실패: {e}")
+
+    # 폴백: 템플릿 반환
+    content = templates.get(framework, templates["pytest"]) 
+    return {"success": True, "framework": framework, "content": content}
+
+
+# 시스템 검증 엔드포인트
+@mcp.custom_route(path="/api/v1/validate", methods=["GET"])
+@handle_errors(
+    category=ErrorCategory.SYSTEM,
+    level=ErrorLevel.LOW,
+    return_on_error={"error": "검증 실패", "success": False}
+)
+@measure_performance(operation_name="validate_system", threshold=3.0)
+async def validate_system(request):
+    """서버/인덱싱/LLM/에러/성능 상태를 통합 검증합니다."""
+    await ensure_services_initialized()
+
+    if not _check_rate_limit(request):
+        return JSONResponse({"error": "Too Many Requests", "success": False}, status_code=429)
+
+    # 쿼리 파라미터
+    params = request.query_params
+    project_id = params.get("project_id", "default")
+
+    server = await get_server_status()
+    indexing = await vector_service.get_search_statistics(project_id)
+    errors = error_handler.get_error_stats()
+    performance = error_handler.get_performance_stats()
+    llm_available = getattr(langchain_rag_service, "llm", None) is not None
+
+    return JSONResponse({
+        "success": True,
+        "llm_available": llm_available,
+        "server": server,
+        "indexing": indexing,
+        "errors": errors,
+        "performance": performance
+    })
+
 
 # 🔄 피드백 관련 FastAPI 엔드포인트들
 @mcp.custom_route(path="/api/v1/feedback", methods=["POST"])
@@ -1777,6 +1923,8 @@ async def rag_enhance_prompt(request):
     """RAG 기반 프롬프트 개선 엔드포인트"""
     try:
         await ensure_services_initialized()
+        if not _check_rate_limit(request):
+            return JSONResponse({"error": "Too Many Requests", "success": False}, status_code=429)
         
         # 요청 데이터 파싱
         data = await request.json()
@@ -1812,6 +1960,8 @@ async def rag_generate_code(request):
     """RAG 기반 코드 생성 엔드포인트"""
     try:
         await ensure_services_initialized()
+        if not _check_rate_limit(request):
+            return {"error": "Too Many Requests", "success": False, "status_code": 429}
         
         # 요청 데이터 파싱
         data = await request.json()
@@ -1847,6 +1997,8 @@ async def rag_search_summarize(request):
     """RAG 기반 검색 및 요약 엔드포인트"""
     try:
         await ensure_services_initialized()
+        if not _check_rate_limit(request):
+            return {"error": "Too Many Requests", "success": False, "status_code": 429}
         
         # 요청 데이터 파싱
         data = await request.json()

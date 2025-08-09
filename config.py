@@ -85,6 +85,13 @@ class Settings(BaseSettings):
     # 검색 최적화
     search_result_cache_ttl: int = 300
     similarity_search_algorithm: str = "cosine"
+    # 하이브리드 검색 가중치 (튜너블)
+    hybrid_semantic_weight: float = 0.7
+    hybrid_keyword_weight: float = 0.3
+    recency_weight: float = 0.1
+    complexity_weight: float = 0.1
+    # TF-IDF 인덱스 TTL (초)
+    tfidf_index_ttl_seconds: int = 300
     
     # 속도 제한 설정 (새로 추가)
     rate_limit_per_minute: int = 600  # 분당 요청 수
