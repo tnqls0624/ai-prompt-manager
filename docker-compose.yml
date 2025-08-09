@@ -175,10 +175,12 @@ services:
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
     volumes:
       - ./monitoring/grafana:/var/lib/grafana
       - ./monitoring/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
-      - ./monitoring/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/provisioning/dashboards:/etc/grafana/dashboards:ro
+      - ./monitoring/provisioning/dashboards:/var/lib/grafana/dashboards:ro
     restart: unless-stopped
     depends_on:
       - prometheus
