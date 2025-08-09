@@ -5,9 +5,12 @@ Production-ready MCP server using FastMCP, ChromaDB vector storage, and local LL
 ## Architecture
 
 ```
-Cursor/IDE → FastMCP Server (SSE/WebSocket) → ChromaDB + Ollama LLM
-             ↓                                    ↓
-         MCP Tools                         LangChain RAG Pipeline
+Cursor/IDE → FastMCP Server (MCP + SSE)
+                 ├─ MCP Tools
+                 ├─ LangChain RAG Pipeline
+                 │     ├─ Retriever → VectorService → ChromaDB
+                 │     └─ LLM → Ollama
+                 └─ Indexing/Watcher/Feedback Services
 ```
 
 ## LLM Usage
