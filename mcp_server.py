@@ -2185,7 +2185,6 @@ async def metrics_endpoint(request):
     """Prometheus metrics (no audit/logging/instrumentation)"""
     if not _PROM_AVAILABLE:
         return Response(content="Prometheus not available", media_type="text/plain", status_code=501)
-    if REQUEST_COUNT:
     data = generate_latest()
     return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 

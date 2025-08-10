@@ -1,3 +1,5 @@
+project_id: mcp-server
+
 # MCP-Enhanced TDD Development Rules
 
 You are a senior software engineer following Kent Beck's TDD and Tidy First principles, enhanced with an intelligent MCP-based prompt optimization system.

@@ -12,7 +12,7 @@ from langchain_community.chat_models import ChatOpenAI
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from langchain.schema import BaseRetriever
-from langchain.callbacks.manager import CallbackManagerForRetrieverRun
+from langchain.callbacks.manager import CallbackManagerForRetrieverRun, AsyncCallbackManagerForRetrieverRun
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain.schema.retriever import BaseRetriever
 from langchain.vectorstores.base import VectorStore
@@ -28,43 +28,68 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 class CustomChromaRetriever(BaseRetriever):
-    """Chroma 벡터 스토어를 위한 커스텀 리트리버"""
-    
-    def __init__(self, vector_service: VectorService, project_id: str = "default", k: int = 5):
-        super().__init__()
-        self.vector_service = vector_service
-        self.project_id = project_id
-        self.k = k
-    
+    """Chroma 벡터 스토어를 위한 커스텀 리트리버 (Pydantic 호환)"""
+
+    # Pydantic 필드로 선언해야 BaseRetriever가 인식합니다
+    vector_service: VectorService
+    project_id: str = "default"
+    k: int = 5
+
+    class Config:
+        arbitrary_types_allowed = True
+
     def _get_relevant_documents(
         self, query: str, *, run_manager: CallbackManagerForRetrieverRun
     ) -> List[Document]:
-        """쿼리와 관련된 문서들을 검색"""
+        """동기 호출 경로는 최소 기능만 지원 (비동기 경로 권장)"""
+        # 비동기 구현 사용을 권장하므로 여기서는 빈 결과 반환 또는 안전 폴백
         try:
-            # 벡터 서비스를 통해 유사한 문서들 검색
-            results = self.vector_service.search_similar_content(
+            loop = None
+            try:
+                import asyncio
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                # 이벤트 루프가 이미 돌고 있으면 동기 경로에서 호출하지 않음
+                return []
+            else:
+                # 독자적 루프로 비동기 검색 실행 (권장되지 않음, 폴백)
+                import asyncio
+                return asyncio.run(self._aget_relevant_documents(query, run_manager=run_manager))
+        except Exception:
+            return []
+
+    async def _aget_relevant_documents(
+        self, query: str, *, run_manager: AsyncCallbackManagerForRetrieverRun
+    ) -> List[Document]:
+        """쿼리와 관련된 문서들을 비동기로 검색"""
+        try:
+            # 벡터 서비스를 통해 유사한 프롬프트 검색 (하이브리드)
+            results = await self.vector_service.search_similar_prompts(
                 query=query,
                 project_id=self.project_id,
                 limit=self.k
             )
-            
-            documents = []
+
+            documents: List[Document] = []
             for result in results:
-                doc = Document(
-                    page_content=result.get('content', ''),
-                    metadata={
-                        'source': result.get('source', ''),
-                        'score': result.get('score', 0.0),
-                        'type': result.get('type', 'unknown'),
-                        'timestamp': result.get('timestamp', ''),
-                        'file_path': result.get('file_path', '')
-                    }
+                content = result.get('content', '')
+                metadata = result.get('metadata', {}) or {}
+                documents.append(
+                    Document(
+                        page_content=content,
+                        metadata={
+                            'source': metadata.get('file_path') or metadata.get('id') or 'vector_db',
+                            'score': result.get('similarity', 0.0),
+                            'type': metadata.get('file_type', metadata.get('prompt_type', 'unknown')),
+                            'timestamp': metadata.get('created_at', ''),
+                            'file_path': metadata.get('file_path', '')
+                        }
+                    )
                 )
-                documents.append(doc)
-            
             logger.info(f"검색된 문서 수: {len(documents)}")
             return documents
-            
         except Exception as e:
             logger.error(f"문서 검색 중 오류 발생: {str(e)}")
             return []
@@ -177,8 +202,8 @@ Focus on using the project context to maintain consistency with existing code pa
                 k=context_limit
             )
             
-            # 2. 관련 문서 검색
-            relevant_docs = retriever.get_relevant_documents(user_prompt)
+            # 2. 관련 문서 검색 (비동기)
+            relevant_docs = await retriever.aget_relevant_documents(user_prompt)
             
             # 3. 컨텍스트 구성
             context_parts = []
@@ -433,14 +458,10 @@ Focus on using the project context to maintain consistency with existing code pa
         """
         try:
             # 리트리버 생성
-            retriever = CustomChromaRetriever(
-                vector_service=self.vector_service,
-                project_id=project_id,
-                k=limit
-            )
+            retriever = CustomChromaRetriever(vector_service=self.vector_service, project_id=project_id, k=limit)
             
-            # 관련 문서 검색
-            relevant_docs = retriever.get_relevant_documents(query)
+            # 관련 문서 검색 (비동기)
+            relevant_docs = await retriever.aget_relevant_documents(query)
             
             # 컨텍스트 구성
             context = "\n\n".join([doc.page_content for doc in relevant_docs])

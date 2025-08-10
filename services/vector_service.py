@@ -105,6 +105,25 @@ class DeepSeekEmbeddings:
         
     async def _get_session(self):
         """HTTP 세션 가져오기 (연결 풀링 최적화)"""
+        # 세션/커넥터가 닫혀있으면 재생성
+        try:
+            if self.session is not None and getattr(self.session, "closed", False):
+                try:
+                    await self.session.close()
+                except Exception:
+                    pass
+                self.session = None
+            if self.connector is not None and getattr(self.connector, "closed", False):
+                try:
+                    await self.connector.close()
+                except Exception:
+                    pass
+                self.connector = None
+        except Exception:
+            # 방어적 처리
+            self.session = None
+            self.connector = None
+
         if self.session is None:
             # 연결 풀 설정 최적화
             if self.connector is None:
@@ -160,14 +179,20 @@ class DeepSeekEmbeddings:
             
             return embeddings
             
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e):
+                logger.warning("이벤트 루프 종료 중 임베딩 요청: 더미 임베딩 반환")
+                return [[0.0] * 768] * len(texts)
+            logger.error(f"DeepSeek 임베딩 생성 중 런타임 오류: {e}")
+            return [[0.0] * 768] * len(texts)
         except Exception as e:
             logger.error(f"DeepSeek 임베딩 생성 중 오류: {e}")
             return [[0.0] * 768] * len(texts)
     
     async def _embed_single_text(self, session: aiohttp.ClientSession, text: str) -> List[float]:
         """단일 텍스트 임베딩 생성"""
-        try:
-            async with session.post(
+        async def _post_once(sess: aiohttp.ClientSession) -> List[float]:
+            async with sess.post(
                 f"{self.api_base}/api/embeddings",
                 json={
                     "model": self.model_name,
@@ -181,7 +206,24 @@ class DeepSeekEmbeddings:
                     error_text = await response.text()
                     logger.error(f"DeepSeek 임베딩 API 오류 {response.status}: {error_text}")
                     return [0.0] * 768
-                    
+
+        try:
+            return await _post_once(session)
+        except (RuntimeError,) as e:
+            # 이벤트 루프 종료 단계에서는 재시도 없이 폴백
+            if "Event loop is closed" in str(e):
+                logger.warning("이벤트 루프 종료로 임베딩 재시도 생략: 더미 임베딩 반환")
+                return [0.0] * 768
+            # 기타 closed 문구는 세션 재생성 후 1회 재시도
+            if "closed" in str(e).lower():
+                try:
+                    session = await self._get_session()
+                    return await _post_once(session)
+                except Exception as e2:
+                    logger.error(f"임베딩 재시도 실패: {e2}")
+                    return [0.0] * 768
+            logger.error(f"예상치 못한 런타임 오류: {e}")
+            return [0.0] * 768
         except aiohttp.ClientError as e:
             logger.error(f"네트워크 오류 발생: {e}")
             return [0.0] * 768
@@ -194,8 +236,15 @@ class DeepSeekEmbeddings:
     
     async def aembed_query(self, text: str) -> List[float]:
         """쿼리 임베딩 생성"""
-        embeddings = await self.aembed_documents([text])
-        return embeddings[0] if embeddings else [0.0] * 768
+        try:
+            embeddings = await self.aembed_documents([text])
+            return embeddings[0] if embeddings else [0.0] * 768
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e):
+                logger.warning("이벤트 루프 종료 중 쿼리 임베딩 요청: 더미 임베딩 반환")
+                return [0.0] * 768
+            logger.error(f"쿼리 임베딩 런타임 오류: {e}")
+            return [0.0] * 768
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """동기 버전 (호환성용)"""
@@ -216,17 +265,10 @@ class DeepSeekEmbeddings:
     
     def __del__(self):
         """소멸자"""
-        try:
-            if self.session or self.connector:
-                try:
-                    loop = asyncio.get_running_loop()
-                    if not loop.is_closed():
-                        loop.create_task(self.close())
-                except RuntimeError:
-                    # 이벤트 루프가 없거나 닫혀있음 - 정상적인 상황
-                    pass
-        except Exception:
-            pass
+        # 이벤트 루프 종료 시점과 충돌을 피하기 위해 여기서는 비동기 정리를 수행하지 않음
+        # 리소스는 프로세스 종료 시 OS가 회수하며, 런타임 중에는 close()를 명시적으로 호출
+        self.session = None
+        self.connector = None
 
 
 class DeepSeekLLM(Runnable):
@@ -247,31 +289,84 @@ class DeepSeekLLM(Runnable):
         return self.session
     
     async def agenerate(self, prompts: List[str]) -> List[str]:
-        """텍스트 생성 (비동기)"""
+        """텍스트 생성 (비동기) - chat 우선, 실패 시 generate 폴백"""
         try:
             session = await self._get_session()
-            results = []
-            
-            for prompt in prompts:
-                async with session.post(
-                    f"{self.api_base}/api/generate",
-                    json={
-                        "model": self.model_name,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {
-                            "temperature": self.temperature,
-                            "num_predict": self.max_tokens
+            results: List[str] = []
+
+            async def _chat_once(prompt_text: str) -> Optional[str]:
+                try:
+                    async with session.post(
+                        f"{self.api_base}/api/chat",
+                        json={
+                            "model": self.model_name,
+                            "messages": [
+                                {
+                                    "role": "system",
+                                    "content": "모든 답변은 반드시 한국어(ko-KR)로만 작성하세요. 사고 과정이나 <think> 등의 메타 텍스트는 출력하지 말고, 최종 답변만 간결하게 제공합니다."
+                                },
+                                {"role": "user", "content": prompt_text}
+                            ],
+                            "stream": False
                         }
-                    }
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        results.append(result.get("response", ""))
-                    else:
-                        logger.error(f"DeepSeek LLM 생성 실패: {response.status}")
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            # Ollama chat returns {message:{content:...}} or aggregated 'response'
+                            if isinstance(data, dict):
+                                if "message" in data and isinstance(data["message"], dict):
+                                    return data["message"].get("content", "")
+                                return data.get("response", "")
+                            return ""
+                        else:
+                            logger.error(f"DeepSeek LLM chat 실패: {resp.status}")
+                            return None
+                except Exception as e:
+                    logger.error(f"DeepSeek LLM chat 오류: {e}")
+                    return None
+
+            async def _generate_once(prompt_text: str) -> Optional[str]:
+                try:
+                    # 한국어 강제 지시를 프롬프트에 주입
+                    prefixed = (
+                        "다음 요청에 대해 한국어(ko-KR)로 간결하게 답변하세요. 사고 과정이나 <think> 내용은 출력하지 마세요.\n\n요청: "
+                        + str(prompt_text)
+                    )
+                    async with session.post(
+                        f"{self.api_base}/api/generate",
+                        json={
+                            "model": self.model_name,
+                            "prompt": prefixed,
+                            "stream": False,
+                            "options": {
+                                "temperature": self.temperature,
+                                "num_predict": self.max_tokens
+                            }
+                        }
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return data.get("response", "")
+                        else:
+                            logger.error(f"DeepSeek LLM 생성 실패: {resp.status}")
+                            return None
+                except Exception as e:
+                    logger.error(f"DeepSeek LLM generate 오류: {e}")
+                    return None
+
+            for prompt in prompts:
+                # 1) chat 시도
+                out = await _chat_once(prompt)
+                if out is None or out == "":
+                    # 2) generate 폴백
+                    gen = await _generate_once(prompt)
+                    if gen is None:
                         results.append("Error: Failed to generate response")
-            
+                    else:
+                        results.append(gen)
+                else:
+                    results.append(out)
+
             return results
         except Exception as e:
             logger.error(f"DeepSeek LLM 생성 중 오류: {e}")

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     embedding_model_type: str = "deepseek"  # "openai" 또는 "deepseek"
     deepseek_api_base: str = "http://deepseek-r1:11434"  # DeepSeek R1 서버 URL (Ollama 기본 포트)
     deepseek_embedding_model: str = "nomic-embed-text"  # 임베딩 전용 모델
-    deepseek_llm_model: str = "r1-1776:latest"  # LLM 전용 모델
+    deepseek_llm_model: str = "deepseek-r1:latest"  # LLM 전용 모델
     local_embedding_model_path: Optional[str] = None
     
     class Config:

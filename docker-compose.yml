@@ -84,7 +84,7 @@ services:
       - EMBEDDING_MODEL_TYPE=${EMBEDDING_MODEL_TYPE:-deepseek}
       - DEEPSEEK_API_BASE=http://deepseek-r1:11434
       - DEEPSEEK_EMBEDDING_MODEL=${DEEPSEEK_EMBEDDING_MODEL:-nomic-embed-text}
-      - DEEPSEEK_LLM_MODEL=${DEEPSEEK_LLM_MODEL:-r1-1776:latest}
+      - DEEPSEEK_LLM_MODEL=${DEEPSEEK_LLM_MODEL:-deepseek-r1:latest}
 
       # 📊 ChromaDB 연결 설정
       - CHROMA_HOST=chromadb
