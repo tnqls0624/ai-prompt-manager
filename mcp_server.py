@@ -124,6 +124,24 @@ logging.basicConfig(
 
 logger = logging.getLogger("mcp-server")
 
+# uvicorn access 로그 중 /metrics 요청은 기록하지 않도록 필터 추가
+class _SuppressMetricsAccessFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+        try:
+            message = record.getMessage()
+        except Exception:
+            try:
+                message = str(record.msg)
+            except Exception:
+                message = ""
+        return "/metrics" not in message
+
+try:
+    uvicorn_access_logger = logging.getLogger("uvicorn.access")
+    uvicorn_access_logger.addFilter(_SuppressMetricsAccessFilter())
+except Exception:
+    pass
+
 # FastMCP 서버 생성
 mcp = FastMCP(
     name="Prompt Enhancement MCP Server",
@@ -368,6 +386,11 @@ def _audit(event: str, meta: Dict[str, Any]):
     if not getattr(settings, 'audit_log_enabled', False):
         return
     try:
+        try:
+            if isinstance(event, str) and event.lower().strip() in {"/metrics", "metrics"}:
+                return
+        except Exception:
+            pass
         record = {
             "timestamp": datetime.now().isoformat(),
             "event": event,
@@ -2159,13 +2182,11 @@ async def validate_system(request):
 
 @mcp.custom_route(path="/metrics", methods=["GET"])
 async def metrics_endpoint(request):
-    """Prometheus metrics (if library is installed)"""
+    """Prometheus metrics (no audit/logging/instrumentation)"""
     if not _PROM_AVAILABLE:
-        return JSONResponse({"error": "Prometheus not available"}, status_code=501)
+        return Response(content="Prometheus not available", media_type="text/plain", status_code=501)
     if REQUEST_COUNT:
-        REQUEST_COUNT.labels('/metrics').inc()
-    with _RequestTimer('/metrics'):
-        data = generate_latest()
+    data = generate_latest()
     return Response(content=data, media_type=CONTENT_TYPE_LATEST)
 
 
