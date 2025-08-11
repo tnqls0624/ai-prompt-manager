@@ -1,8 +1,9 @@
-# FastMCP Prompt Enhancement Server
+# FastMCP 프롬프트 향상 서버
 
-Production-ready MCP server using FastMCP, ChromaDB vector storage, and local LLM via Ollama for intelligent prompt enhancement.
+FastMCP, ChromaDB 벡터 저장소, Ollama 로컬 LLM을 활용한 프롬프트 매니징 서버입니다.
+유저의 프롬프팅 및 히스토리를 저장하고 해당 데이터를 기반으로 유저의 요구사항에 대한 상세한 프롬프팅을 만들어서 LLM에 요청합니다.
 
-## Architecture
+## 아키텍처
 
 ```
 Cursor/IDE → FastMCP Server (MCP + SSE)
@@ -13,164 +14,163 @@ Cursor/IDE → FastMCP Server (MCP + SSE)
                  └─ Indexing/Watcher/Feedback Services
 ```
 
-## LLM Usage
+## LLM 사용
 
-The server uses LLM in two modes:
+본 서버는 두 가지 모드로 동작합니다.
 
-### 1. **With LLM (Full Features)**
+### 1) LLM 사용(전체 기능)
 
-- **Model**: `r1-1776:latest` via Ollama
-- **Embeddings**: `nomic-embed-text` (Nomic AI)
-- **Capabilities**:
-  - AI-powered prompt enhancement
-  - Context-aware code generation
-  - Intelligent summarization
+- 모델: `deepseek-r1:latest` (Ollama)
+- 임베딩: `nomic-embed-text` (Nomic AI)
+- 제공 기능:
+  - AI 기반 프롬프트 향상
+  - 컨텍스트 기반 코드 생성
+  - 지능형 요약
 
-### 2. **Without LLM (Fallback Mode)**
+### 2) LLM 미사용(폴백 모드)
 
-- Still functional with template-based enhancement
-- Uses `StandardPromptFormatter` for structured improvements
-- Vector search and context retrieval remain available
+- 템플릿 기반 향상으로 동작 지속
+- `StandardPromptFormatter`를 사용한 구조화 개선
+- 벡터 검색/컨텍스트 조회 기능 유지
 
-## Core Components
+## 코어 컴포넌트
 
-### 1. MCP Tools (15 available)
+### 1) MCP 도구(15개)
 
-**LLM-Powered Tools:**
+**LLM 활용 도구:**
 
-- `enhance_prompt` - AI-powered prompt improvement (uses LLM when available)
-- `get_prompt_recommendations` - Context-aware recommendations
-- `generate_test_skeleton` - Minimal failing test scaffolding (LLM-aware with fallback)
+- `enhance_prompt` - LLM 사용 시 AI 기반 프롬프트 향상
+- `get_prompt_recommendations` - 컨텍스트 기반 추천
+- `generate_test_skeleton` - 최소 실패 테스트 스켈레톤(LLM 폴백 지원)
 
-**Vector Search Tools (No LLM Required):**
+**벡터 검색 도구(LLM 불필요):**
 
-- `store_conversation` - Persist user-AI interactions
-- `search_similar_conversations` - Semantic search using embeddings
-- `search_project_files` - Search indexed project files
-- `get_project_context_info` - Project context retrieval
+- `store_conversation` - 사용자-AI 상호작용 저장
+- `search_similar_conversations` - 임베딩 기반 의미 검색
+- `search_project_files` - 인덱싱된 프로젝트 파일 검색
+- `get_project_context_info` - 프로젝트 컨텍스트 조회
 
-**Analytics Tools (No LLM Required):**
+**분석 도구(LLM 불필요):**
 
-- `analyze_conversation_patterns` - Pattern analysis
-- `analyze_prompt_patterns` - K-means clustering
-- `extract_prompt_keywords` - TF-IDF keyword extraction
-- `analyze_prompt_trends` - Temporal trend analysis
+- `analyze_conversation_patterns` - 패턴 분석
+- `analyze_prompt_patterns` - K-means 클러스터링
+- `extract_prompt_keywords` - TF-IDF 키워드 추출
+- `analyze_prompt_trends` - 시계열 트렌드 분석
 
-**Feedback Tools:**
+**피드백 도구:**
 
-- `submit_user_feedback` - Feedback loop
-- `get_feedback_statistics` - Metrics and analytics
-- `analyze_feedback_patterns` - Pattern recognition
+- `submit_user_feedback` - 피드백 루프
+- `get_feedback_statistics` - 지표/분석
+- `analyze_feedback_patterns` - 패턴 인식
 
-**System Tools:**
+**시스템 도구:**
 
-- `get_fast_indexing_stats` - Performance metrics
-- `get_server_status` - Health check
+- `get_fast_indexing_stats` - 인덱싱 성능 지표
+- `get_server_status` - 서버 헬스 체크
 
-### 2. REST API Endpoints
+### 2) REST API 엔드포인트
 
-**LLM-Required Endpoints:**
+**LLM 필수:**
 
-- `/api/v1/rag/enhance-prompt` - LangChain RAG enhancement with LLM
-- `/api/v1/rag/generate-code` - Code generation (primary LLM usage)
-- `/api/v1/rag/search-summarize` - Search and summarize with LLM
+- `/api/v1/rag/enhance-prompt` - LLM 기반 LangChain RAG 향상
+- `/api/v1/rag/generate-code` - 코드 생성(주요 LLM 사용처)
+- `/api/v1/rag/search-summarize` - 검색 + 요약
 
-**LLM-Optional Endpoints:**
+**LLM 선택:**
 
-- `/api/v1/enhance-prompt-stream/{connection_id}` - Streaming enhancement (fallback available)
-- `/api/v1/sse/{connection_id}` - Server-sent events
-- `/api/v1/upload-batch` - Batch file upload
-- `/api/v1/watcher/start` - File system monitoring
-- `/api/v1/feedback` - Feedback submission
-- `/api/v1/heartbeat` - Server health check
-- `/api/v1/validate` - System/indexing/LLM health and readiness check
-- `/api/v1/resource/snippet` - Return a file snippet by path and line range
-- `/api/v1/rag/generate-edit` - Generate minimal JSON edits for code changes
-- `/metrics` - Prometheus metrics (optional)
-- `/dashboard` - Simple HTML dashboard (auto refresh)
-- `/api/v1/index/warmup/{project_id}` - Build TF-IDF/BM25 caches for a project
-- `/api/v1/audit/recent` - Recent audit items (JSONL)
-- `/api/v1/audit/search` - Search audit logs by project/event/since
-- `/dashboard` - Simple HTML dashboard (auto refresh)
+- `/api/v1/enhance-prompt-stream/{connection_id}` - 스트리밍 향상(폴백 지원)
+- `/api/v1/sse/{connection_id}` - SSE 연결
+- `/api/v1/upload-batch` - 배치 파일 업로드
+- `/api/v1/watcher/start` - 파일 시스템 감시 시작
+- `/api/v1/feedback` - 피드백 제출
+- `/api/v1/heartbeat` - 서버 상태 체크
+- `/api/v1/validate` - 시스템/인덱싱/LLM 종합 점검
+- `/api/v1/resource/snippet` - 파일 경로/라인 범위로 스니펫 반환
+- `/api/v1/rag/generate-edit` - 최소 JSON 에디트 생성
+- `/api/v1/index/warmup/{project_id}` - 프로젝트별 TF-IDF/BM25 캐시 빌드
+- `/api/v1/audit/recent` - 최근 감사 로그(JSONL)
+- `/api/v1/audit/search` - 감사 로그 검색(프로젝트/이벤트/기간)
+- `/metrics` - Prometheus 메트릭(선택)
+- `/dashboard` - 간단 대시보드(자동 새로고침)
 
-### 3. Services
+### 3) 서비스
 
-- **VectorService** - ChromaDB integration with Nomic embeddings
-- **PromptEnhancementService** - Core prompt improvement (LLM with fallback)
-- **FastIndexingService** - Parallel file indexing (100+ files concurrently)
-- **LangChainRAGService** - RAG pipeline with LLM integration
-- **FileWatcherService** - Real-time file monitoring
-- **FeedbackService** - User feedback processing
-- **AdvancedAnalyticsService** - ML-powered analytics (clustering, TF-IDF)
+- `VectorService` - ChromaDB + Nomic 임베딩 연동
+- `PromptEnhancementService` - 프롬프트 향상(LLM 폴백)
+- `FastIndexingService` - 병렬 파일 인덱싱
+- `LangChainRAGService` - RAG 파이프라인 + LLM 연동
+- `FileWatcherService` - 실시간 파일 감시
+- `FeedbackService` - 사용자 피드백 처리
+- `AdvancedAnalyticsService` - ML 분석
 
-## Performance
+## 성능
 
-Optimized for high throughput with actual benchmarks:
+실측 기준 고성능 최적화:
 
-- **Concurrent Processing**: 100 simultaneous requests
-- **File Processing**: 200 files in parallel
-- **Embedding Batch**: 100 documents per batch
-- **ChromaDB Batch**: 500 vectors per write
-- **Connection Pool**: 100 persistent HTTP connections
-- **LLM Requests**: Async with timeout handling
-- **Hybrid Search**: Parallel semantic + TF-IDF with project-scoped cache
-- **Reranking**: Tunable weights for semantic/keyword/recency/complexity
-- **TF-IDF Index**: Cached per project with TTL to avoid recomputation
-- **Persistent Index Cache**: Vectorizer + matrix persisted under `cache_dir`
+- 동시 처리: 100 요청
+- 파일 처리: 200 파일 병렬
+- 임베딩 배치: 100 문서/배치
+- ChromaDB 배치: 500 벡터/쓰기
+- 연결 풀: 100 지속 HTTP 커넥션
+- LLM 요청: 비동기 + 타임아웃 처리
+- 하이브리드 검색: 의미 + TF-IDF 병렬, 프로젝트 범위 캐시
+- 재랭킹: 의미/키워드/최신성/복잡도 가중치 튜닝
+- TF-IDF 인덱스: 프로젝트별 TTL 캐시
+- 지속 캐시: `cache_dir` 아래 벡터라이저/행렬 저장
 
-## Quick Start
+## 빠른 시작
 
-### 1. Using Docker (Recommended)
+### 1) Docker 사용(권장)
 
 ```bash
-# Start all services (including Ollama)
+# 모든 서비스 시작(Ollama 포함)
 docker-compose up -d
 
-# Check if Ollama model is loaded
+# Ollama 모델 로드 확인
 docker exec deepseek-r1-server ollama list
 
-# If model not loaded, pull it
-docker exec deepseek-r1-server ollama pull r1-1776
+# 미로딩 시 모델 풀(Pull)
+docker exec deepseek-r1-server ollama pull deepseek-r1
 
-# View logs
+# 로그 보기
 docker-compose logs -f fastmcp-server
 ```
 
-### 2. Direct Python
+### 2) Python 직접 실행
 
 ```bash
-# Install dependencies
+# 의존성 설치
 pip install -r requirements.txt
 
-# Ensure Ollama is running locally
+# 로컬 Ollama 실행 보장
 ollama serve
 
-# Pull the model
-ollama pull r1-1776
+# 모델 풀
+ollama pull deepseek-r1
 ollama pull nomic-embed-text
 
-# Run server
+# 서버 실행
 python mcp_server.py
 ```
 
-## Configuration
+## 설정
 
-Key environment variables in `docker-compose.yml`:
+`docker-compose.yml`의 주요 환경변수:
 
 ```yaml
 environment:
-  # Model Configuration
-  - EMBEDDING_MODEL_TYPE=deepseek # Configuration name (uses Ollama backend)
-  - DEEPSEEK_API_BASE=http://deepseek-r1:11434 # Ollama server endpoint
-  - DEEPSEEK_EMBEDDING_MODEL=nomic-embed-text # Nomic AI embedding model
-  - DEEPSEEK_LLM_MODEL=r1-1776:latest # LLM model via Ollama
+  # 모델 설정
+  - EMBEDDING_MODEL_TYPE=deepseek # Ollama 백엔드 사용 구성명
+  - DEEPSEEK_API_BASE=http://deepseek-r1:11434 # Ollama 엔드포인트
+  - DEEPSEEK_EMBEDDING_MODEL=nomic-embed-text # Nomic 임베딩 모델
+  - DEEPSEEK_LLM_MODEL=deepseek-r1:latest # LLM 모델
 
-  # Performance Settings
+  # 성능 설정
   - MAX_CONCURRENT_REQUESTS=100
   - EMBEDDING_BATCH_SIZE=100
   - CHROMA_BATCH_SIZE=500
 
-  # Hybrid Search Weights (optional)
+  # 하이브리드 검색 가중치(선택)
   - HYBRID_SEMANTIC_WEIGHT=0.7
   - HYBRID_KEYWORD_WEIGHT=0.3
   - RECENCY_WEIGHT=0.1
@@ -178,54 +178,47 @@ environment:
   - TFIDF_INDEX_TTL_SECONDS=300
   - CACHE_DIR=/data/cache
 
-  # Warmup at start (optional)
+  # 시작 시 워밍업(선택)
   - WARMUP_ON_START=false
   - WARMUP_PROJECT_IDS=my-project,another-project
 
-  # Audit log (optional)
+  # 감사 로그(선택)
   - AUDIT_LOG_ENABLED=false
 
-  # Auth (disabled by default)
+  # 인증(기본 비활성)
   - REQUIRE_API_KEY=false
   - API_KEY=
   - JWT_ENABLED=false
   - JWT_SECRET=
   - JWT_ALGORITHMS=HS256
   - PROJECT_QUOTA_PER_MINUTE=0
-
-  # Warmup at start (optional)
-  - WARMUP_ON_START=false
-  - WARMUP_PROJECT_IDS=my-project,another-project
-
-  # Audit log (optional)
-  - AUDIT_LOG_ENABLED=false
 ```
 
-**Note**: Variable names use "deepseek" prefix for historical reasons. Actual models:
+참고: 환경변수 접두사로 "deepseek"를 사용하지만, 실제 모델은 아래와 같습니다.
 
-- **Embeddings**: Nomic AI's `nomic-embed-text` (1.5GB, 768 dimensions)
-- **LLM**: `r1-1776:latest` via Ollama (size varies)
+- 임베딩: `nomic-embed-text` (약 1.5GB, 768차원)
+- LLM: `deepseek-r1:latest` (Ollama)
 
-## Project Upload
+## 프로젝트 업로드
 
-### High-performance batch upload:
+### 고속 배치 업로드
 
 ```bash
 python scripts/fast_upload.py /path/to/project --project-id my-project
 ```
 
-Features:
+특징:
 
-- Parallel file reading (50 concurrent)
-- Batch API calls (300 files per request)
-- Automatic retry with exponential backoff
-- Progress tracking
+- 파일 병렬 읽기(동시 50)
+- 배치 API 호출(요청당 300 파일)
+- 지수 백오프 자동 재시도
+- 진행률 추적
 
-## MCP Integration
+## MCP 통합
 
-### Cursor Setup
+### Cursor 설정
 
-Add to your MCP settings:
+MCP 설정에 다음을 추가하세요:
 
 ```json
 {
@@ -236,7 +229,7 @@ Add to your MCP settings:
       "env": {
         "EMBEDDING_MODEL_TYPE": "deepseek",
         "DEEPSEEK_EMBEDDING_MODEL": "nomic-embed-text",
-        "DEEPSEEK_LLM_MODEL": "r1-1776:latest",
+        "DEEPSEEK_LLM_MODEL": "deepseek-r1:latest",
         "DEEPSEEK_API_BASE": "http://localhost:11434"
       }
     }
@@ -244,35 +237,35 @@ Add to your MCP settings:
 }
 ```
 
-### Usage Examples
+### 사용 예시
 
-#### With LLM:
+#### LLM 사용
 
 ```python
-# Full AI-powered enhancement
+# AI 기반 프롬프트 향상
 result = await enhance_prompt(
     prompt="Build a React component",
     project_id="my-project",
     context_limit=5
 )
-# Returns: AI-generated improved prompt with context
+# 반환: 컨텍스트가 반영된 개선 프롬프트
 ```
 
-#### Without LLM (Fallback):
+#### LLM 미사용(폴백)
 
 ```python
-# Same call, but returns template-based enhancement
+# 동일 호출이지만 템플릿 기반 향상 반환
 result = await enhance_prompt(
     prompt="Build a React component",
     project_id="my-project",
     context_limit=5
 )
-# Returns: Structured template with context, no AI generation
+# 반환: 컨텍스트 포함 구조화 템플릿(비 LLM)
 ```
 
-#### Generate Test Skeleton (TDD Red phase helper):
+#### 테스트 스켈레톤 생성(TDD Red)
 
-#### Streamed Code Generation (SSE):
+#### 스트리밍 코드 생성(SSE)
 
 ```bash
 curl -N -X POST http://localhost:8000/api/v1/rag/generate-code \
@@ -285,13 +278,13 @@ curl -N -X POST http://localhost:8000/api/v1/rag/generate-code \
       }'
 ```
 
-#### Get File Snippet:
+#### 파일 스니펫 가져오기
 
 ```bash
 curl "http://localhost:8000/api/v1/resource/snippet?file_path=/host_projects/myproj/app.py&start_line=10&end_line=60"
 ```
 
-#### Generate Minimal JSON Edits:
+#### 최소 JSON 에디트 생성
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/rag/generate-edit \
@@ -307,53 +300,53 @@ curl -X POST http://localhost:8000/api/v1/rag/generate-edit \
 ```python
 result = await generate_test_skeleton(
     feature="user can reset password via token",
-    framework="pytest",           # or "jest", "unittest"
+    framework="pytest",  # 또는 "jest", "unittest"
     project_id="my-project"
 )
-print(result["content"])  # test file content
+print(result["content"])  # 생성된 테스트 파일 내용
 ```
 
-## Technical Stack
+## 기술 스택
 
-- **FastMCP 2.9.0** - MCP protocol implementation
-- **ChromaDB 0.4.22** - Vector database
-- **LangChain 0.1.5** - RAG pipeline and LLM orchestration
-- **Ollama** - Local LLM server
-  - `r1-1776:latest` - Language model
-  - `nomic-embed-text` - Embedding model
-- **scikit-learn 1.3.0** - ML algorithms (clustering, TF-IDF)
-- **SSE/WebSocket** - Real-time communication
+- FastMCP 2.9.0 - MCP 프로토콜 구현
+- ChromaDB 0.4.22 - 벡터 DB
+- LangChain 0.1.5 - RAG/LLM 오케스트레이션
+- Ollama - 로컬 LLM 서버
+  - `deepseek-r1:latest` - 언어 모델
+  - `nomic-embed-text` - 임베딩 모델
+- scikit-learn 1.3.0 - ML(클러스터링/TF-IDF)
+- SSE/WebSocket - 실시간 통신
 
-## Resource Requirements
+## 리소스 요구사항
 
-### Minimum (Without LLM):
+### 최소(LLM 미사용)
 
-- **Memory**: 2GB
-- **CPU**: 2 cores
-- **Storage**: 1GB + data
+- 메모리: 2GB
+- CPU: 2코어
+- 스토리지: 1GB + 데이터
 
-### Recommended (With LLM):
+### 권장(LLM 사용)
 
-- **Memory**: 8GB (more for larger models)
-- **CPU**: 4 cores
-- **Storage**: SSD with 20GB+ for models
-- **Docker**: 6GB memory allocation
+- 메모리: 8GB 이상(모델 크기 의존)
+- CPU: 4코어
+- 스토리지: SSD 20GB+ (모델)
+- Docker: 6GB 메모리 할당
 
-## Development
+## 개발
 
-### Running Tests
+### 테스트 실행
 
 ```bash
 python -m pytest tests/ -v
 ```
 
-### Adding New MCP Tools
+### 신규 MCP 도구 추가
 
 ```python
 @mcp.tool()
 async def your_new_tool(param: str) -> Dict[str, Any]:
     """Tool description"""
-    # Can use self.llm if available
+    # self.llm 사용 가능 시 활용
     if self.llm:
         result = await self.llm.arun(prompt)
     else:
@@ -361,79 +354,59 @@ async def your_new_tool(param: str) -> Dict[str, Any]:
     return result
 ```
 
-## Architecture Decisions
+## 아키텍처 결정(ADR)
 
-1. **FastMCP over raw MCP**: Better performance, built-in SSE support
-2. **ChromaDB over alternatives**: Best local vector DB performance
-3. **Ollama for LLM**: Local execution, privacy, no API costs
-4. **Nomic embeddings**: Open-source, efficient, good quality
-5. **Fallback mechanisms**: Service remains functional without LLM
-6. **Parallel processing**: 5-10x performance gains
+1. FastMCP 채택: 성능 우수, SSE 기본 지원
+2. ChromaDB 채택: 로컬 벡터 DB 중 성능 우수
+3. Ollama 사용: 로컬 실행/프라이버시/비용 절감
+4. Nomic 임베딩: 오픈소스/효율/품질
+5. 폴백 메커니즘: LLM 없이도 서비스 지속
+6. 병렬 처리: 5~10배 성능 향상
 
-## Monitoring
+## 모니터링
 
 ```bash
-# Check LLM availability
+# LLM 가용성 확인
 curl http://localhost:11434/api/tags
 
-# Performance stats
+# 성능 상태
 curl http://localhost:8000/api/v1/heartbeat
 
-# Error tracking
+# 에러 추적
 docker-compose logs fastmcp-server | grep ERROR
 
-# ChromaDB health
+# ChromaDB 헬스
 curl http://localhost:8001/api/v1/heartbeat
 
-# System validation (LLM/indexing/errors/perf)
+# 시스템 종합 점검(LLM/인덱싱/에러/성능)
 curl "http://localhost:8000/api/v1/validate?project_id=my-project"
 
-# Prometheus metrics (optional)
+# Prometheus 메트릭(선택)
 curl http://localhost:8000/metrics
 
-# Simple Dashboard (auto refresh)
-open http://localhost:8000/dashboard
+# 대시보드(그라파나)
+open http://localhost:3000
 ```
 
-## Known Limitations
+## 알려진 제한 사항
 
-- Maximum file size: 50MB per file
-- ChromaDB collection limit: 1M vectors
-- Concurrent connections: 100 (configurable)
-- LLM context window: Model-dependent (typically 8K-32K tokens)
-- LLM response time: 1-10 seconds depending on prompt complexity
+- 단일 파일 최대 50MB
+- ChromaDB 컬렉션 최대 100만 벡터
+- 동시 연결 100(설정 가능)
+- LLM 컨텍스트 창: 모델 의존(통상 8K~32K 토큰)
+- LLM 응답 시간: 프롬프트 복잡도에 따라 1~10초
 
-## Troubleshooting
+## 트러블슈팅
 
-### LLM Not Working?
+### LLM 동작 안할시
 
 ```bash
-# Check Ollama status
+# Ollama 상태 확인
 curl http://localhost:11434/api/tags
 
-# Verify model is loaded
+# 모델 로드 확인
 ollama list
 
-# Pull model if missing
-ollama pull r1-1776
+# 모델 미설치 시 Pull
+ollama pull deepseek-r1
 ```
-
-### Fallback to Template Mode
-
-- Service automatically falls back if LLM is unavailable
-- Check logs for "LLM 초기화 실패" messages
-- Template-based enhancement still provides structured improvements
-
-## Contributing
-
-Pull requests welcome. Focus on:
-
-- Performance improvements
-- New MCP tool implementations
-- Better LLM prompt engineering
-- Enhanced fallback mechanisms
-- Test coverage
-
----
-
-Built for production. Works with or without LLM. Just works.

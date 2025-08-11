@@ -126,6 +126,7 @@ services:
       # 원하는 프로젝트 폴더만 개별적으로 마운트:
       - /Users/soobeen/Desktop/Project/lovechedule-app:/host_projects/lovechedule-app:ro
       - /Users/soobeen/Desktop/Project/lovechedule:/host_projects/lovechedule:ro
+      - /Users/soobeen/Desktop/Project/virtual-avatar:/host_projects/virtual-avatar:ro
       # - /Users/soobeen/Desktop/Project/web-frontend:/host_projects/web-frontend:ro
       # - /Users/soobeen/Desktop/Project/api-backend:/host_projects/api-backend:ro
 
